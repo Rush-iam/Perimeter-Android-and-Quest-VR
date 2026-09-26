@@ -26,6 +26,7 @@ set(PERIMETER_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../Perimeter")
 set(OPTION_FFMPEG_MOVIES ON CACHE BOOL "")
 set(OPTION_SOKOL ON CACHE BOOL "" FORCE)
 set(OPTION_SOKOL_API "GLES3" CACHE STRING "" FORCE)
+option(PERIMETER_ANDROID_XR "Build the Quest Android XR variant" OFF)
 option(PERIMETER_ANDROID_STACKTRACE
     "Build Android stacktrace support and fetch Boost headers" ON)
 if(PERIMETER_ANDROID_STACKTRACE)
@@ -117,6 +118,9 @@ perimeter_android_verify_git_revision(SDL2_image "${sdl2_image_SOURCE_DIR}"
     abcf63aa71b4e3ac32120fa9870a6500ddcdcc89)
 
 android_add_dxvk("${android_sdl_source_dir}/include" games-frame-pacing::swappy_static)
+if(PERIMETER_ANDROID_XR)
+    find_package(OpenXR REQUIRED CONFIG)
+endif()
 # The renderer compiles against DXVK's stable D3D9 headers only. The
 # generation-specific DSOs are packaged by android_dxvk_runtime and loaded
 # by AndroidDxvkLoader after the engine command line is initialized.
@@ -150,6 +154,9 @@ set_target_properties(ffmpeg PROPERTIES
 add_subdirectory(${PERIMETER_ROOT} perimeter_engine EXCLUDE_FROM_ALL)
 target_sources(Sound PRIVATE AndroidSoundLoader.cpp)
 
+# The DXVK header staging tree is replaced when its patch changes. Render
+# compiles against those generated headers, so it must wait for that refresh.
+add_dependencies(Render android_dxvk_patch_v2)
 add_dependencies(perimeter ${ANDROID_DXVK_RUNTIME_TARGET})
 
 # RenderSokol compiles independently from the final shared library and needs
@@ -235,6 +242,12 @@ foreach(_perimeter_android_sdl_consumer IN LISTS _perimeter_android_native_targe
             perimeter_android_thin_lto)
     add_dependencies(${_perimeter_android_sdl_consumer}
             perimeter_android_sdl_headers)
+    if(PERIMETER_ANDROID_XR)
+        # XR adds fields to shared engine classes such as cCamera and
+        # GameShell. Keep their layouts consistent in every engine target.
+        target_compile_definitions(${_perimeter_android_sdl_consumer} PRIVATE
+                ANDROID_XR=1)
+    endif()
 endforeach()
 unset(_perimeter_android_sdl_consumer)
 unset(_perimeter_android_native_targets)
@@ -246,6 +259,15 @@ target_sources(perimeter PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/AndroidTouchInput.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/AndroidDxvkLoader.cpp")
 target_link_libraries(perimeter PRIVATE AndroidDxvk::Headers)
+if(PERIMETER_ANDROID_XR)
+    target_sources(perimeter PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/AndroidXrBootstrap.cpp")
+    target_link_libraries(perimeter PRIVATE OpenXR::openxr_loader)
+    target_link_libraries(perimeter PRIVATE vulkan)
+    target_include_directories(perimeter PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/android-dxvk-v2/patched-source/src/d3d9")
+    target_include_directories(perimeter PRIVATE
+        "${PERIMETER_ROOT}/Source/Render/D3D")
+endif()
 target_link_libraries(perimeter PRIVATE dl)
 target_include_directories(perimeter PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_include_directories(Render PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

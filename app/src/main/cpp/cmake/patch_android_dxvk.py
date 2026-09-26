@@ -216,15 +216,15 @@ namespace dxvk {
             'VkResult status = m_vkl->vkCreateInstance(&info, nullptr, &instance);',
             '''VkResult status = g_androidXrHooks.createInstance
         ? g_androidXrHooks.createInstance(g_androidXrHooks.userData, &info, nullptr, &instance)
-        : VK_ERROR_INITIALIZATION_FAILED;''')
+        : m_vkl->vkCreateInstance(&info, nullptr, &instance);''')
     replace("src/dxvk/dxvk_instance.cpp",
             '''  bool DxvkInstance::initAdapters() {
     uint32_t numAdapters = 0;''',
             '''  bool DxvkInstance::initAdapters() {
     VkPhysicalDevice xrDevice = VK_NULL_HANDLE;
-    if (!g_androidXrHooks.selectPhysicalDevice
-     || g_androidXrHooks.selectPhysicalDevice(g_androidXrHooks.userData,
-          m_vki->instance(), &xrDevice) != VK_SUCCESS || !xrDevice)
+    if (g_androidXrHooks.selectPhysicalDevice &&
+        (g_androidXrHooks.selectPhysicalDevice(g_androidXrHooks.userData,
+          m_vki->instance(), &xrDevice) != VK_SUCCESS || !xrDevice))
       throw DxvkError("OpenXR did not select a Vulkan physical device");
 
     uint32_t numAdapters = 0;''')
@@ -232,7 +232,7 @@ namespace dxvk {
             '''    for (uint32_t i = 0; i < numAdapters; i++) {
       Rc<DxvkAdapter> adapter = new DxvkAdapter(*this, adapters[i]);''',
             '''    for (uint32_t i = 0; i < numAdapters; i++) {
-      if (adapters[i] != xrDevice)
+      if (xrDevice && adapters[i] != xrDevice)
         continue;
       Rc<DxvkAdapter> adapter = new DxvkAdapter(*this, adapters[i]);''')
     replace("src/dxvk/dxvk_adapter.cpp",
@@ -243,7 +243,7 @@ namespace dxvk {
             '''VkResult vr = g_androidXrHooks.createDevice
       ? g_androidXrHooks.createDevice(g_androidXrHooks.userData,
           m_handle, &deviceInfo, nullptr, &device)
-      : VK_ERROR_INITIALIZATION_FAILED;''')
+      : vk->vkCreateDevice(m_handle, &deviceInfo, nullptr, &device);''')
 
 
 def patch_v1():

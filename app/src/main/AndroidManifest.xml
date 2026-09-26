@@ -33,12 +33,16 @@
                 android:defaultHeight="720dp"
                 android:minWidth="640dp"
                 android:minHeight="360dp" />
+        </activity>
+        <activity-alias
+            android:name=".MobileActivity"
+            android:targetActivity=".ContentActivity"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
     </application>
 
 </manifest>

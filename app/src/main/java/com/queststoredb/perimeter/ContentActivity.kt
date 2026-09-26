@@ -454,7 +454,16 @@ class ContentActivity : Activity() {
 
     private fun startGame() {
         try {
-            startActivity(Intent(this, MainActivity::class.java))
+            val questVrLaunch = BuildConfig.FLAVOR == "quest"
+            val gameActivity = if (questVrLaunch) QuestGameActivity::class.java else MainActivity::class.java
+            startActivity(Intent(this, gameActivity).apply {
+                if (BuildConfig.DEBUG && questVrLaunch)
+                    putExtra("quest_test_mission", intent.getStringExtra("quest_test_mission"))
+                if (questVrLaunch) {
+                    addCategory("com.oculus.intent.category.VR")
+                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+            })
             finish()
         } catch (error: Exception) {
             showContentError(error)

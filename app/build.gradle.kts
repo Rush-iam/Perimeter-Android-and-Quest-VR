@@ -29,6 +29,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments += "-DANDROID_STL=c++_shared"
+                arguments += "-DPERIMETER_ANDROID_XR=OFF"
                 val androidStacktrace = providers.gradleProperty("androidStacktrace").orNull
                     ?.takeIf { it.isNotBlank() } ?: "ON"
                 arguments += "-DPERIMETER_ANDROID_STACKTRACE=$androidStacktrace"
@@ -112,6 +113,21 @@ android {
             resValue("string", "app_name", "Perimeter Dev")
         }
     }
+    flavorDimensions += "device"
+    productFlavors {
+        create("mobile") {
+            dimension = "device"
+        }
+        create("quest") {
+            dimension = "device"
+            applicationIdSuffix = ".quest"
+            externalNativeBuild {
+                cmake {
+                    arguments += "-DPERIMETER_ANDROID_XR=ON"
+                }
+            }
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
@@ -136,4 +152,5 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.games.frame.pacing)
     implementation(libs.material)
+    add("questImplementation", libs.openxr.loader.android)
 }

@@ -1,4 +1,7 @@
 #include "AndroidDxvkLoader.h"
+#if defined(ANDROID_XR)
+#include "AndroidXrBootstrap.h"
+#endif
 
 #if defined(__ANDROID__)
 
@@ -91,6 +94,15 @@ void androidDxvkSetSdl2Window(SDL_Window* window) {
 
 IDirect3D9* androidDxvkCreateD3D9(UINT sdkVersion) {
     ensureLoaded();
+#if defined(ANDROID_XR)
+    const char* version = check_command_line("android_dxvk_version");
+    if (!dxvkHandle || !version || version[0] != '2' || version[1] != '\0' ||
+        !androidXrBootstrapInitialize(dxvkHandle)) {
+        logError("Quest VR requires DXVK 2 and a working OpenXR bootstrap");
+        androidXrBootstrapDestroy();
+        return nullptr;
+    }
+#endif
     return direct3DCreate9 ? direct3DCreate9(sdkVersion) : nullptr;
 }
 

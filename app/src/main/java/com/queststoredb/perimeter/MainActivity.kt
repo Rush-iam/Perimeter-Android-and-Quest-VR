@@ -13,7 +13,7 @@ import org.libsdl.app.SDL
 import org.libsdl.app.SDLActivity
 import org.libsdl.app.SDLSurface
 
-class MainActivity : SDLActivity() {
+open class MainActivity : SDLActivity() {
     private var mouseBackButtonHeld = false
 
     override fun createSDLSurface(context: android.content.Context): SDLSurface =
@@ -139,13 +139,22 @@ class MainActivity : SDLActivity() {
             "Grant all-files access and select the game folder before starting the engine"
         }
         val limitToHalfRefresh = FrameRateLimit.load(this)
+        val questVr = BuildConfig.FLAVOR == "quest"
+        val questTutorial = BuildConfig.DEBUG && questVr &&
+            intent.getStringExtra("quest_test_mission") == "Tutorial"
         val arguments = GameLaunchOptions(this).arguments(path).filterNot {
             val key = it.removePrefix("tmp_").substringBefore('=')
-            key == "android_vsync_interval" || key == "VSync"
+            key == "android_vsync_interval" || key == "VSync" ||
+                (questVr && (key == "graph" || key == "android_dxvk_version"))
         }
         return (arguments + listOfNotNull(
             "android_vsync_interval=2".takeIf { limitToHalfRefresh },
-            "VSync=1"
+            "VSync=1",
+            "graph=d3d9".takeIf { questVr },
+            "android_dxvk_version=2".takeIf { questVr },
+            "mainmenu=0".takeIf { questTutorial },
+            "mission=Tutorial".takeIf { questTutorial },
+            "disableBriefing=1".takeIf { questTutorial }
         )).toTypedArray()
     }
 }

@@ -166,7 +166,7 @@ function(_android_add_dxvk_generation
         set(android_dxvk_git_repository https://github.com/doitsujin/dxvk.git)
         set(android_dxvk_git_tag c3dd74be6baec53786d4e064a572185b70347a17)
         set(android_dxvk_variant v2)
-        if(ANDROID_DXVK_XR)
+        if(PERIMETER_ANDROID_XR)
             set(android_dxvk_variant v2-xr)
         endif()
     else()
@@ -323,7 +323,7 @@ function(_android_add_dxvk_generation
     ExternalProject_Add(${android_dxvk_build_target}
         SOURCE_DIR "${android_dxvk_patched_source_dir}"
         BINARY_DIR "${dxvk_build}/build"
-        DEPENDS ${android_dxvk_patch_target}
+        DEPENDS ${android_dxvk_patch_target} android_dxvk_stl_runtime
         DOWNLOAD_COMMAND ""
         UPDATE_COMMAND ""
         CONFIGURE_COMMAND "${CMAKE_COMMAND}" -P "${android_dxvk_setup_script}"
@@ -422,6 +422,23 @@ function(android_add_dxvk sdl_include_dir swappy_target)
         message(FATAL_ERROR "Android DXVK requires ANDROID_STL=c++_shared")
     endif()
 
+    # Meson resolves -lc++_shared from the ABI output directory. Gradle may
+    # clear that directory between builds, so restore the NDK runtime first.
+    set(android_dxvk_stl_source
+        "${CMAKE_SYSROOT}/usr/lib/aarch64-linux-android/libc++_shared.so")
+    set(android_dxvk_stl_output
+        "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libc++_shared.so")
+    if(NOT EXISTS "${android_dxvk_stl_source}")
+        message(FATAL_ERROR "Android DXVK C++ runtime not found: ${android_dxvk_stl_source}")
+    endif()
+    add_custom_command(OUTPUT "${android_dxvk_stl_output}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${android_dxvk_stl_source}" "${android_dxvk_stl_output}"
+        DEPENDS "${android_dxvk_stl_source}"
+        COMMENT "Staging Android DXVK C++ runtime")
+    add_custom_target(android_dxvk_stl_runtime DEPENDS "${android_dxvk_stl_output}")
+
     # Keep Meson's command and its Windows paths in this function scope. SDL
     # preparation runs in a separate CMake function because it must happen
     # before SDL's add_subdirectory() configuration.
@@ -431,7 +448,7 @@ function(android_add_dxvk sdl_include_dir swappy_target)
         message(FATAL_ERROR "Android DXVK requires the patched SDL2 target")
     endif()
 
-    if(NOT ANDROID_DXVK_XR)
+    if(NOT PERIMETER_ANDROID_XR)
         _android_add_dxvk_generation(1 "${sdl_include_dir}" "${swappy_target}")
         set(android_dxvk_v1_headers "${android_dxvk_header_dirs}")
         set(android_dxvk_v1_package "${android_dxvk_package_targets}")
