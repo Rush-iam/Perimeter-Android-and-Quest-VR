@@ -13,10 +13,16 @@
 ## Build & Run
 - **Build System:** Gradle (for Android) + CMake (for Native Engine).
 - **Gradle Tasks:**
-  - `./gradlew :app:assembleReleaseBenchmark`: Build the release-optimized,
+  - `./gradlew :app:assembleMobileReleaseBenchmark`: Build the release-optimized,
     diagnostics-accessible development APK.
-  - `./gradlew :app:assembleRelease`: Build the production Release APK.
-  - `./gradlew :app:installReleaseBenchmark`: Install the development APK to a connected device.
+  - `./gradlew :app:assembleMobileRelease`: Build the production Android APK.
+  - `./gradlew :app:installMobileReleaseBenchmark`: Install the Android development APK.
+  - `./gradlew :app:assembleQuestRelease`: Build the production Quest VR APK.
+  - `./gradlew :app:installQuestReleaseBenchmark`: Install the Quest VR development APK.
+- Android and Quest VR are separate `mobile` and `quest` product flavors. The
+  Quest flavor is VR-only: it compiles with `ANDROID_XR`, includes OpenXR, and
+  initializes XR without a `quest_vr` runtime argument. Keep XR dependencies,
+  manifest entries, CMake options, and native code isolated to that flavor.
 - **ABI Filter:** Currently targeting `arm64-v8a`.
 - **Min SDK:** 29 (Android 10).
 - **Target SDK:** 37 (Android 15).
@@ -37,7 +43,7 @@
   performance baseline:
   ```powershell
   $env:GRADLE_USER_HOME = Join-Path $env:USERPROFILE '.gradle'
-  .\gradlew.bat "-Duser.home=$env:USERPROFILE" --no-daemon :app:assembleRelease --console=plain
+  .\gradlew.bat "-Duser.home=$env:USERPROFILE" --no-daemon :app:assembleMobileRelease --console=plain
   ```
 - Android native optimization defaults to `O2`. Build the Android-scoped O3
   candidate explicitly with `-PandroidOptimization=O3`; do not change the
@@ -57,14 +63,14 @@
 - The sandbox PowerShell environment may expose Java's `user.home` as the filesystem root. Use the repository cache and quote the Java user-home argument so the Windows Gradle wrapper passes it through correctly:
   ```powershell
   $env:GRADLE_USER_HOME = Join-Path (Get-Location) '.gradle'
-  .\gradlew.bat "-Duser.home=$env:USERPROFILE" --no-daemon :app:assembleReleaseBenchmark --console=plain
+  .\gradlew.bat "-Duser.home=$env:USERPROFILE" --no-daemon :app:assembleMobileReleaseBenchmark --console=plain
   ```
-- For a connected-device install, use the same environment and replace `:app:assembleReleaseBenchmark` with `:app:installReleaseBenchmark`. Set `$env:HOME = $env:USERPROFILE` before invoking `adb` if it reports `Cannot mkdir '\.android': Permission denied`.
+- For a connected-device Android install, use the same environment and replace `:app:assembleMobileReleaseBenchmark` with `:app:installMobileReleaseBenchmark`. Use `:app:installQuestReleaseBenchmark` for the VR-only Quest flavor. Set `$env:HOME = $env:USERPROFILE` before invoking `adb` if it reports `Cannot mkdir '\.android': Permission denied`.
 - Leave `ANDROID_USER_HOME` and `ANDROID_SDK_HOME` unset. `-Duser.home=$env:USERPROFILE` keeps Android tooling and debug signing pointed at the normal `%USERPROFILE%\.android` location; do not redirect them to a repository or sandbox-local keystore.
 - If the sandbox denies access to `%USERPROFILE%\.android`, rerun the same Gradle command with elevated execution rather than redirecting Android's user directory or debug keystore.
 
 ### Signing and Device Installs
-- Use Android Studio's default debug keystore at `%USERPROFILE%\.android\debug.keystore` for releaseBenchmark APKs installed on the configured Android device.
+- Use Android Studio's default debug keystore at `%USERPROFILE%\.android\debug.keystore` for releaseBenchmark APKs installed on the configured Android device. The Quest flavor's debug benchmark variant is `questReleaseBenchmark`.
 - The debug key alias is `androiddebugkey`. Keep the keystore outside the repository; do not substitute a repository-local or sandbox-local debug keystore.
 - Do not set `ANDROID_USER_HOME` to a repository-local path when building or installing. The Android Gradle plugin derives the default debug keystore from that location, which would silently select `.android\debug.keystore` inside the repository and produce an APK that cannot update the Android Studio-signed install.
 - If an isolated Gradle cache is needed, set `GRADLE_USER_HOME` only; leave `ANDROID_USER_HOME` unset so signing resolves to `%USERPROFILE%\.android\debug.keystore`.
@@ -77,18 +83,23 @@
 - **Platform Abstraction:** Use SDL2 for input, sound, and networking where possible.
 - **Graphics:** Prefer **DirectX via DXVK** (primary path); **Sokol** is used only as a fallback.
 - **Logging:** Use the Android log redirector (see `AndroidLog.cpp`) for native logs.
+- **XR isolation:** Guard every XR-specific change in `/Perimeter` and
+  `/app/src/main/cpp` with `#if defined(ANDROID_XR)`. Do not use `__ANDROID__`
+  alone for XR code: ordinary Android builds must not compile or execute XR
+  paths. Define `ANDROID_XR` only for the XR-enabled native targets, and add
+  XR-only sources, headers, dependencies, and link settings conditionally.
 
 ### Android Development
 - **UI:** The wrapper uses standard Android Views/Activity for now; Jetpack Compose is preferred for any new Android-specific UI.
 - **Namespace:** `com.queststoredb.perimeter`.
 
 ### Frame-Pacing Benchmark Workflow
-- Use the Android Studio-compatible `releaseBenchmark` build for release
+- Use the Android Studio-compatible `mobileReleaseBenchmark` build for release
   performance captures and the established scripts under `scripts/frame-pacing/`.
-  `releaseBenchmark` is initialized from `Release` and is debuggable only so
+  `mobileReleaseBenchmark` is initialized from `Release` and is debuggable only so
   `run-as` can retrieve native timing files; do not treat the ordinary
   non-debuggable `Release` APK as capture-ready.
-- After restarting `ContentActivity` with the release/releaseBenchmark build, wait **2 seconds** for the launcher, tap **Play**, then wait **7 seconds after that tap** for the game main menu. Do not run `Start-TutorialBenchmark.ps1` while the launcher is still visible.
+- After restarting `ContentActivity` with the mobileRelease/mobileReleaseBenchmark build, wait **2 seconds** for the launcher, tap **Play**, then wait **7 seconds after that tap** for the game main menu. Do not run `Start-TutorialBenchmark.ps1` while the launcher is still visible.
 - Obtain the current **Play** button bounds from `adb shell uiautomator dump /data/local/tmp/perimeter-ui.xml` before an automated tap, and tap their center. The launcher can appear in portrait or landscape, so fixed screen coordinates are unreliable.
 - Start `Start-TutorialBenchmark.ps1` from the game's top menu with `-InitialMenuSeconds 0 -TransitionSeconds 2`; use the established mission-load wait and verify the gameplay HUD before capture. The script's menu navigation must not begin from the launcher or a submenu.
 - `Capture-FramePacingRun.ps1` defaults to a **10-second warm-up**. The canonical controlled zoom case is 1.5 seconds out, 1.5 seconds in, repeated 21 times for a 63-second window; capture it from a fresh Tutorial mission. The seven-cycle form remains a short diagnostic.
