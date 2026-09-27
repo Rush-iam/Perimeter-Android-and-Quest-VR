@@ -4,6 +4,7 @@
 
 #include "AndroidXrBootstrap.h"
 #include "xmath.h"
+#include <algorithm>
 #include <cmath>
 
 // Converts tracking-space poses into the engine's camera convention. The same
@@ -54,7 +55,8 @@ public:
     void UpdateControls(const float leftStick[2], bool leftActive,
                         float scaleStickY, bool rightActive,
                         float deltaSeconds, const Vect3f& currentWorldPivot,
-                        const MatXf& centerWorld, const float headPosition[3]) {
+                        const MatXf& centerWorld, const float headPosition[3],
+                        const Vect3f& skyCenter, float skyRadius) {
         const auto applyDeadzone = [](float value) {
             if (std::abs(value) <= stickDeadzone_) return 0.0f;
             return std::copysign((std::abs(value) - stickDeadzone_) /
@@ -67,24 +69,53 @@ public:
             const float y = applyDeadzone(leftStick[1]);
             if (x != 0.0f || y != 0.0f) {
                 // Pan linearly with enlargement, but ease zoomed-out panning
-                // with a square-root response around the default scale.
+                // with a cube-root response around the default scale.
                 const float tableScale = defaultUnitsPerMeter_ / unitsPerMeter_;
                 const float panScale = tableScale > 1.0f
-                    ? tableScale : std::sqrt(tableScale);
+                    ? tableScale : std::cbrt(tableScale);
                 offset_ += Vect3f(x, 0.0f, y) *
-                    (unitsPerMeter_ * panScale * 3.6f * deltaSeconds);
+                    (unitsPerMeter_ * panScale * 5.4f * deltaSeconds);
             }
         }
-        if (scaleInput == 0.0f) return;
-        MatXf worldToRig = centerWorld;
-        worldToRig.invert();
-        const Vect3f pivot = worldToRig * currentWorldPivot;
-        // Fewer engine units per tracking meter make the tabletop larger.
-        float unitsPerMeter = unitsPerMeter_ *
-            std::exp(-scaleInput * 2.1f * deltaSeconds);
-        if (unitsPerMeter < 12.5f) unitsPerMeter = 12.5f;
-        if (unitsPerMeter > 800.0f) unitsPerMeter = 800.0f;
-        SetScaleWithPivotDepth(unitsPerMeter, headPosition, pivot);
+        if (scaleInput != 0.0f) {
+            MatXf worldToRig = centerWorld;
+            worldToRig.invert();
+            const Vect3f pivot = worldToRig * currentWorldPivot;
+            // Fewer engine units per tracking meter make the tabletop larger.
+            float unitsPerMeter = unitsPerMeter_ *
+                std::exp(-scaleInput * 2.1f * deltaSeconds);
+            if (unitsPerMeter < 12.5f) unitsPerMeter = 12.5f;
+            if (unitsPerMeter > 800.0f) unitsPerMeter = 800.0f;
+            SetScaleWithPivotDepth(unitsPerMeter, headPosition, pivot);
+        }
+        if (skyRadius > 0.0f) {
+            // Bound stick movement of the table anchor, leaving natural head
+            // motion untouched. Reserve room for a physical lean at any scale.
+            const float margin = std::min(skyRadius * 0.25f,
+                                          unitsPerMeter_ * 1.5f);
+            const float limit = skyRadius - margin;
+            const Vect3f fromCenter = centerWorld * offset_ - skyCenter;
+            // Clamp to the horizontal cross-section at the current height.
+            // A 3D radial clamp pulls the camera downward at the upper edge.
+            const float verticalDistanceSquared = fromCenter.z * fromCenter.z;
+            // There is no horizontal cross-section above the sphere. Do not
+            // snap the table to its center or alter its height in that case.
+            if (verticalDistanceSquared >= limit * limit) return;
+            const float horizontalLimitSquared =
+                limit * limit - verticalDistanceSquared;
+            const float horizontalDistanceSquared =
+                fromCenter.x * fromCenter.x + fromCenter.y * fromCenter.y;
+            if (horizontalDistanceSquared > horizontalLimitSquared) {
+                const float factor = std::sqrt(horizontalLimitSquared /
+                                               horizontalDistanceSquared);
+                const Vect3f boundedWorld(skyCenter.x + fromCenter.x * factor,
+                                          skyCenter.y + fromCenter.y * factor,
+                                          skyCenter.z + fromCenter.z);
+                MatXf worldToRig = centerWorld;
+                worldToRig.invert();
+                offset_ = worldToRig * boundedWorld;
+            }
+        }
     }
 
 private:
