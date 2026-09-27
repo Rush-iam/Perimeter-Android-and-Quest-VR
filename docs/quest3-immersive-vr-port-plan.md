@@ -201,8 +201,34 @@ Phases 0 and 1 are prerequisites for both camera modes. Tabletop is a bounded fi
 
 Future verification should cover matrix/ray consistency, once-per-frame state advancement, target restoration after nested passes, moving/deforming terrain in stereo, transparent effects, controller focus cancellation, unit deletion during selection, and repeated load/unload. Assess stereo and comfort inside the headset; mirror images and source inspection cannot establish those results.
 
-## Decisions remaining after the prototype
+## Phase 2 implementation record: first playable tabletop
 
-The source analysis cannot establish the actual Quest runtime's compatible Vulkan feature set, transfer overhead, sustainable scene complexity, or the best world scale. Measure these first. Then choose whether direct-image wrapping is needed before the playable milestone, whether the existing terrain path needs more than shared preparation, and whether SDLActivity is a suitable XR host.
+### Accepted scope
 
-The first implementation task should be the isolated **DXVK 2 D3D9 → OpenXR Vulkan stereo smoke prototype**. Its output should include a reproducible Quest build, capability/timing report, image ownership and synchronization design, and a demonstrated session lifecycle. That provides the evidence needed to commit to the larger engine and UX work.
+Phase 2 is complete for the agreed first-playable tabletop scope. On Quest 3, normal mission starts, tracked controller interaction, table translation and yaw, HUD hover and click, live unit movement, building placement, focus recovery, and stereo terrain consistency have been confirmed. The [progress tracker](quest3-immersive-vr-progress.md) records the implementation and headset evidence. This completion records the accepted scope; it does not close the later lifecycle, positioning, or performance gates.
+
+The implementation keeps Quest runtime code in the `quest` product flavor and `ANDROID_XR` path. Shared engine seams are guarded so the standard mobile and PC paths retain their existing behavior. The Quest and mobile benchmark variants were built during this work; detailed build and device observations are in the progress tracker.
+
+### Implemented areas
+
+| Area | Result |
+| --- | --- |
+| P2-1. Controller input | OpenXR Touch actions provide left and right aim poses, thumbsticks, select/command/menu/cancel/rotate inputs, and press/release edges. Focus loss and invalid aim clear held input. |
+| P2-2. Tabletop rig | One `XrCameraRig` transform maps both eye poses and controller rays. Left-stick translation, right-stick yaw, and runtime Meta-button recentering were confirmed. Scale adjustment and seated fallback remain deferred. |
+| P2-3. Stereo terrain | Both eye visibility regions contribute to one terrain LOD/residency preparation per XR frame. Headset checks confirmed consistent terrain across tile boundaries and during terrain updates. |
+| P2-4. World interaction | Controller rays select friendly units, clear empty selection, and issue ground movement commands. Live unit movement was confirmed on Quest. |
+| P2-5. Building placement | Controller aim updates the existing placement ghost; rotation, valid-location confirmation, cancel, and focus-loss cleanup use the existing placement checks. Building placement was confirmed in-headset. |
+| P2-6. HUD panel | The legacy HUD/menu draws once to a shared OpenXR quad panel. Ray hover, pointer, and click behavior were confirmed. Panel height, positioning, and repositioning polish remain deferred. |
+| P2-7. Normal flow | The normal Quest path successfully starts missions through the shared menu panel. Cold-launch, resume, and relaunch regression coverage remains in Phase 6. |
+
+### Deferred gates
+
+- Menu/HUD height and placement polish, panel repositioning, map scale controls, and seated fallback remain follow-up work.
+- Cold launch, resume, relaunch, and broader session-loss regression remain in Phase 6.
+- Full mission completion and advanced strategic controls remain in Phases 3 and 4. Sustained performance remains in Phase 5.
+
+## Decisions carried forward after Phase 2
+
+The measured DXVK 2 D3D9-to-OpenXR Vulkan GPU-copy bridge remains the Quest rendering path. Keep measuring transfer cost and scene complexity; consider direct-image wrapping only if the panel or gameplay path exposes a specific blocker.
+
+Stereo terrain now shares visibility, LOD, and residency preparation across both eyes once per XR frame. Further terrain LOD changes remain independent of the completed Phase 2 seam. Menu/HUD placement and table scale are deferred as described above, and broader session-loss hardening remains in Phase 6.
