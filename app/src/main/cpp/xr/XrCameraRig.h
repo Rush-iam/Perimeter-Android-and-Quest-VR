@@ -11,10 +11,7 @@
 class XrCameraRig {
 public:
     void BeginFrame(const AndroidXrEyeView views[2], bool recentered) {
-        if (recentered) {
-            anchored_ = false;
-            ResetTableManipulation();
-        }
+        if (recentered) anchored_ = false;
         if (anchored_) return;
         for (int axis = 0; axis < 3; ++axis)
             anchor_[axis] = (views[0].position[axis] + views[1].position[axis]) * 0.5f;
@@ -35,7 +32,7 @@ public:
         return MatXf(engineRotation, offset_ + relative * unitsPerMeter_);
     }
 
-    // A 2x tabletop enlargement moves the selected pivot 1.8x farther in XR,
+    // A 2x tabletop enlargement moves the current pivot 1.8x farther in XR,
     // while preserving its direction from the head.
     void SetScaleWithPivotDepth(float unitsPerMeter, const float headPosition[3],
                                 const Vect3f& pivot) {
@@ -51,38 +48,20 @@ public:
     }
 
     bool NeedsTablePivot(float scaleStickY, bool rightActive) const {
-        return rightActive && !tablePivotLatched_ &&
-            std::abs(scaleStickY) > stickDeadzone_;
-    }
-
-    void ResetTableManipulation() {
-        tablePivotLatched_ = false;
-        tablePivotIdleSeconds_ = 0.0f;
+        return rightActive && std::abs(scaleStickY) > stickDeadzone_;
     }
 
     void UpdateControls(const float leftStick[2], bool leftActive,
                         float scaleStickY, bool rightActive,
-                        float deltaSeconds, const Vect3f& candidateWorldPivot,
+                        float deltaSeconds, const Vect3f& currentWorldPivot,
                         const MatXf& centerWorld, const float headPosition[3]) {
-        if (deltaSeconds <= 0.0f) return;
         const auto applyDeadzone = [](float value) {
             if (std::abs(value) <= stickDeadzone_) return 0.0f;
             return std::copysign((std::abs(value) - stickDeadzone_) /
                                  (1.0f - stickDeadzone_), value);
         };
         const float scaleInput = rightActive ? applyDeadzone(scaleStickY) : 0.0f;
-        if (scaleInput != 0.0f) {
-            if (!tablePivotLatched_) {
-                tablePivotWorld_ = candidateWorldPivot;
-                tablePivotLatched_ = true;
-            }
-            tablePivotIdleSeconds_ = 0.0f;
-        } else if (tablePivotLatched_) {
-            tablePivotIdleSeconds_ += deltaSeconds;
-            if (tablePivotIdleSeconds_ >= 0.2f) ResetTableManipulation();
-        }
-
-        if (deltaSeconds > 0.1f) return;
+        if (deltaSeconds <= 0.0f || deltaSeconds > 0.1f) return;
         if (leftActive) {
             const float x = applyDeadzone(leftStick[0]);
             const float y = applyDeadzone(leftStick[1]);
@@ -99,7 +78,7 @@ public:
         if (scaleInput == 0.0f) return;
         MatXf worldToRig = centerWorld;
         worldToRig.invert();
-        const Vect3f pivot = worldToRig * tablePivotWorld_;
+        const Vect3f pivot = worldToRig * currentWorldPivot;
         // Fewer engine units per tracking meter make the tabletop larger.
         float unitsPerMeter = unitsPerMeter_ *
             std::exp(-scaleInput * 2.1f * deltaSeconds);
@@ -115,9 +94,6 @@ private:
     float anchor_[3]{};
     float unitsPerMeter_ = defaultUnitsPerMeter_;
     Vect3f offset_ = Vect3f::ZERO;
-    bool tablePivotLatched_ = false;
-    float tablePivotIdleSeconds_ = 0.0f;
-    Vect3f tablePivotWorld_ = Vect3f::ZERO;
 };
 
 #endif
