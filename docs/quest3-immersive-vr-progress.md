@@ -75,6 +75,8 @@ The precise gates and ordering are in the [delivery sequence](quest3-immersive-v
 - 2026-09-26: After the user observed a fast lack-power icon animation, XR icon hide/phase/show updates for buildings and Omega corridors and the selected Frame placement-preview update were moved to the once-per-stereo-frame `PrepareShowInfo` pass. Mono builds retain the existing `ShowInfo` timing. Quest and mobile release benchmark APKs built, and the Quest APK was installed and launched into Tutorial with an active game process and no recent XR or Android runtime errors. The user confirmed in-headset that the lack-power animation speed now looks normal and the selected Frame placement preview appears correctly.
 - 2026-09-26: The user clarified that live unit movement was confirmed to work well on Quest. This replaces the earlier provisional P2-4 acceptance; no live movement check remains outstanding for the agreed Phase 2 scope.
 
+- 2026-09-27: Right-stick horizontal orbit was removed from `XrCameraRig` at the user's request. The stick's vertical axis still scales the table around the selected pivot; left-stick translation, headset tracking, and runtime recentering remain active. The earlier right-stick yaw confirmations above describe historical behavior.
+
 ## Phase 1 implementation and verification
 
 | Item | State | Evidence and next step |
