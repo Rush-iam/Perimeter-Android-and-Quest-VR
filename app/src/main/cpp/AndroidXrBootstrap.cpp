@@ -47,10 +47,12 @@ struct Bootstrap {
     XrSpace localSpace = XR_NULL_HANDLE;
     XrActionSet actionSet = XR_NULL_HANDLE;
     XrAction aimAction = XR_NULL_HANDLE;
+    XrAction gripAction = XR_NULL_HANDLE;
     XrAction thumbstickAction = XR_NULL_HANDLE;
     XrAction buttonActions[5]{};
     XrPath handPaths[2]{};
     XrSpace aimSpaces[2]{};
+    XrSpace gripSpaces[2]{};
     unsigned previousHeld[2]{};
     bool previousActive[2]{};
     bool focused = false;
@@ -67,6 +69,7 @@ struct Bootstrap {
     float panelWidthMeters = 1.2f;
     bool panelReady = false;
     bool panelPoseInitialized = false;
+    bool panelHandAttached = false;
     bool panelVisible = true;
     ID3D9VkInteropDevice* interop = nullptr;
     VkQueue graphicsQueue = VK_NULL_HANDLE;
@@ -140,11 +143,13 @@ bool createInputActions() {
         return xrCreateAction(state.actionSet, &info, &action) == XR_SUCCESS;
     };
     if (!makeAction(state.aimAction, XR_ACTION_TYPE_POSE_INPUT, "aim_pose", "Aim pose") ||
+        !makeAction(state.gripAction, XR_ACTION_TYPE_POSE_INPUT, "grip_pose", "Grip pose") ||
         !makeAction(state.thumbstickAction, XR_ACTION_TYPE_VECTOR2F_INPUT,
                     "table_control", "Table control") ||
         !makeAction(state.buttonActions[0], XR_ACTION_TYPE_BOOLEAN_INPUT, "select", "Select") ||
         !makeAction(state.buttonActions[1], XR_ACTION_TYPE_BOOLEAN_INPUT, "command", "Command") ||
-        !makeAction(state.buttonActions[2], XR_ACTION_TYPE_BOOLEAN_INPUT, "menu", "Menu") ||
+        !makeAction(state.buttonActions[2], XR_ACTION_TYPE_BOOLEAN_INPUT,
+                    "panel_toggle", "Panel toggle") ||
         !makeAction(state.buttonActions[3], XR_ACTION_TYPE_BOOLEAN_INPUT, "cancel", "Cancel") ||
         !makeAction(state.buttonActions[4], XR_ACTION_TYPE_BOOLEAN_INPUT, "rotate", "Rotate"))
         return false;
@@ -156,17 +161,19 @@ bool createInputActions() {
     const Binding paths[] = {
         {state.aimAction, "/user/hand/left/input/aim/pose"},
         {state.aimAction, "/user/hand/right/input/aim/pose"},
+        {state.gripAction, "/user/hand/left/input/grip/pose"},
+        {state.gripAction, "/user/hand/right/input/grip/pose"},
         {state.thumbstickAction, "/user/hand/left/input/thumbstick"},
         {state.thumbstickAction, "/user/hand/right/input/thumbstick"},
         {state.buttonActions[0], "/user/hand/left/input/trigger/value"},
         {state.buttonActions[0], "/user/hand/right/input/trigger/value"},
         {state.buttonActions[1], "/user/hand/left/input/squeeze/value"},
         {state.buttonActions[1], "/user/hand/right/input/squeeze/value"},
-        {state.buttonActions[2], "/user/hand/left/input/menu/click"},
+        {state.buttonActions[2], "/user/hand/left/input/x/click"},
         {state.buttonActions[2], "/user/hand/right/input/a/click"},
         {state.buttonActions[3], "/user/hand/left/input/y/click"},
         {state.buttonActions[3], "/user/hand/right/input/b/click"},
-        {state.buttonActions[4], "/user/hand/left/input/x/click"},
+        {state.buttonActions[4], "/user/hand/left/input/thumbstick/click"},
         {state.buttonActions[4], "/user/hand/right/input/thumbstick/click"},
     };
     std::vector<XrActionSuggestedBinding> bindings;
@@ -197,6 +204,9 @@ bool attachInputActions() {
         info.poseInActionSpace.orientation.w = 1.0f;
         info.action = state.aimAction;
         if (xrCreateActionSpace(state.session, &info, &state.aimSpaces[hand]) != XR_SUCCESS)
+            return false;
+        info.action = state.gripAction;
+        if (xrCreateActionSpace(state.session, &info, &state.gripSpaces[hand]) != XR_SUCCESS)
             return false;
     }
     return true;
@@ -254,6 +264,23 @@ void snapshotInput(AndroidXrInputFrame* output) {
         value.aimPosition[2] = p.position.z;
         value.aimOrientation[0] = p.orientation.x; value.aimOrientation[1] = p.orientation.y;
         value.aimOrientation[2] = p.orientation.z; value.aimOrientation[3] = p.orientation.w;
+        get.action = state.gripAction;
+        XrActionStatePose grip{XR_TYPE_ACTION_STATE_POSE};
+        XrSpaceLocation gripLocation{XR_TYPE_SPACE_LOCATION};
+        if (xrGetActionStatePose(state.session, &get, &grip) == XR_SUCCESS && grip.isActive &&
+            xrLocateSpace(state.gripSpaces[hand], state.localSpace,
+                          state.frameState.predictedDisplayTime, &gripLocation) == XR_SUCCESS &&
+            (gripLocation.locationFlags & valid) == valid) {
+            const auto& pose = gripLocation.pose;
+            value.gripPosition[0] = pose.position.x;
+            value.gripPosition[1] = pose.position.y;
+            value.gripPosition[2] = pose.position.z;
+            value.gripOrientation[0] = pose.orientation.x;
+            value.gripOrientation[1] = pose.orientation.y;
+            value.gripOrientation[2] = pose.orientation.z;
+            value.gripOrientation[3] = pose.orientation.w;
+            value.gripValid = true;
+        }
         get.action = state.thumbstickAction;
         XrActionStateVector2f thumbstick{XR_TYPE_ACTION_STATE_VECTOR2F};
         if (xrGetActionStateVector2f(state.session, &get, &thumbstick) == XR_SUCCESS &&
@@ -544,19 +571,36 @@ void destroyPanelTarget() {
 
 void initializePanelPose() {
     auto& state = bootstrap;
-    if (state.panelPoseInitialized || !state.viewsValid) return;
+    if (state.panelHandAttached || state.panelPoseInitialized || !state.viewsValid) return;
     const auto& left = state.views[0].pose;
     const auto& right = state.views[1].pose;
-    state.panelPose.orientation = left.orientation;
     XrVector3f center{(left.position.x + right.position.x) * 0.5f,
                       (left.position.y + right.position.y) * 0.5f,
                       (left.position.z + right.position.z) * 0.5f};
-    const XrVector3f forward = rotateByQuaternion(state.panelPose.orientation, {0, 0, -1});
-    const XrVector3f up = rotateByQuaternion(state.panelPose.orientation, {0, 1, 0});
-    state.panelPose.position = {center.x + forward.x * 1.4f + up.x * 0.22f,
-                                center.y + forward.y * 1.4f + up.y * 0.22f,
-                                center.z + forward.z * 1.4f + up.z * 0.22f};
+    XrVector3f forward = rotateByQuaternion(left.orientation, {0, 0, -1});
+    const float horizontalLength = std::sqrt(forward.x * forward.x +
+                                             forward.z * forward.z);
+    if (horizontalLength > 1.0e-5f) {
+        forward.x /= horizontalLength;
+        forward.z /= horizontalLength;
+    } else {
+        forward.x = 0.0f;
+        forward.z = -1.0f;
+    }
+    const float halfYaw = 0.5f * std::atan2(-forward.x, -forward.z);
+    state.panelPose.orientation = {0.0f, std::sin(halfYaw), 0.0f,
+                                   std::cos(halfYaw)};
+    state.panelPose.position = {center.x + forward.x * 1.4f,
+                                center.y,
+                                center.z + forward.z * 1.4f};
     state.panelPoseInitialized = true;
+}
+
+XrQuaternionf multiplyQuaternions(const XrQuaternionf& a, const XrQuaternionf& b) {
+    return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+            a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+            a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+            a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
 }
 
 bool ensurePanelTarget(uint32_t width, uint32_t height) {
@@ -958,6 +1002,54 @@ bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigne
     return true;
 }
 
+void androidXrSetUiPanelFixed() {
+    auto& state = bootstrap;
+    if (state.panelHandAttached) {
+        state.panelHandAttached = false;
+        state.panelPoseInitialized = false;
+        state.panelWidthMeters = 1.2f;
+    }
+    initializePanelPose();
+}
+
+bool androidXrAttachUiPanelToHand(const AndroidXrHandState& hand, unsigned handIndex) {
+    auto& state = bootstrap;
+    state.panelHandAttached = true;
+    state.panelWidthMeters = 0.34f;
+    if (handIndex > 1 || !hand.gripValid || !hand.aimValid) return false;
+    const XrQuaternionf orientation{hand.gripOrientation[0], hand.gripOrientation[1],
+                                    hand.gripOrientation[2], hand.gripOrientation[3]};
+    // Keep the tuned offset in grip space so it pivots around the hand. Grip -Y
+    // produced the desired front-back movement in the headset, but the OpenXR
+    // grip pose does not define that axis as controller-forward.
+    const float side = handIndex == 0 ? 1.0f : -1.0f;
+    const XrVector3f offset = rotateByQuaternion(orientation,
+        {side * 0.09f, -0.11f, -0.08f});
+    const XrVector3f basePosition{hand.gripPosition[0] + offset.x,
+                                  hand.gripPosition[1] + offset.y,
+                                  hand.gripPosition[2] + offset.z};
+    const XrQuaternionf aimOrientation{hand.aimOrientation[0], hand.aimOrientation[1],
+                                       hand.aimOrientation[2], hand.aimOrientation[3]};
+    // The pointer aims along aim -Z; aim +Y is its actual up direction.
+    const XrVector3f aimUp = rotateByQuaternion(aimOrientation, {0.0f, 1.0f, 0.0f});
+    const XrVector3f fromPointer{basePosition.x - hand.aimPosition[0],
+                                 basePosition.y - hand.aimPosition[1],
+                                 basePosition.z - hand.aimPosition[2]};
+    const float aimHeight = fromPointer.x * aimUp.x + fromPointer.y * aimUp.y +
+                            fromPointer.z * aimUp.z;
+    const float heightCorrection = 0.07f - aimHeight;
+    // Grip +Z points down with a naturally held Touch controller. Rotate the
+    // tablet around the grip's X axis so its front faces the player.
+    constexpr float halfTiltRadians = -55.0f * (3.14159265f / 180.0f);
+    state.panelPose.orientation = multiplyQuaternions(orientation,
+        {std::sin(halfTiltRadians), 0.0f, 0.0f,
+         std::cos(halfTiltRadians)});
+    state.panelPose.position = {basePosition.x + heightCorrection * aimUp.x,
+                                basePosition.y + heightCorrection * aimUp.y,
+                                basePosition.z + heightCorrection * aimUp.z};
+    return true;
+}
+
 void androidXrSetUiPanelVisible(bool visible) {
     bootstrap.panelVisible = visible;
 }
@@ -1234,6 +1326,8 @@ void androidXrBootstrapDestroySession() {
     }
     destroyPanelTarget();
     bootstrap.panelPoseInitialized = false;
+    bootstrap.panelHandAttached = false;
+    bootstrap.panelWidthMeters = 1.2f;
     bootstrap.recenterTime = 0;
     bootstrap.d3dDevice = nullptr;
     bootstrap.eyeFormat = VK_FORMAT_UNDEFINED;
@@ -1241,6 +1335,8 @@ void androidXrBootstrapDestroySession() {
     for (unsigned hand = 0; hand < 2; ++hand) {
         if (bootstrap.aimSpaces[hand]) xrDestroySpace(bootstrap.aimSpaces[hand]);
         bootstrap.aimSpaces[hand] = XR_NULL_HANDLE;
+        if (bootstrap.gripSpaces[hand]) xrDestroySpace(bootstrap.gripSpaces[hand]);
+        bootstrap.gripSpaces[hand] = XR_NULL_HANDLE;
     }
     for (uint32_t eye = 0; eye < 2; ++eye) {
         bootstrap.swapchainImages[eye].clear();

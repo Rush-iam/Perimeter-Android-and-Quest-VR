@@ -16,7 +16,7 @@ struct AndroidXrEyeView {
 enum AndroidXrButton : unsigned {
     ANDROID_XR_SELECT = 1u << 0,
     ANDROID_XR_COMMAND = 1u << 1,
-    ANDROID_XR_MENU = 1u << 2,
+    ANDROID_XR_PANEL = 1u << 2,
     ANDROID_XR_CANCEL = 1u << 3,
     ANDROID_XR_ROTATE = 1u << 4,
 };
@@ -24,10 +24,13 @@ enum AndroidXrButton : unsigned {
 struct AndroidXrHandState {
     float aimPosition[3]{};
     float aimOrientation[4]{};
+    float gripPosition[3]{};
+    float gripOrientation[4]{};
     float thumbstick[2]{};
     unsigned pressed = 0;
     unsigned released = 0;
     bool aimValid = false;
+    bool gripValid = false;
     bool thumbstickActive = false;
 };
 
@@ -57,6 +60,8 @@ void androidXrRestoreUiPanelViewport(cInterfaceRenderDevice* renderer,
 void androidXrEndUiPanel(cInterfaceRenderDevice* renderer);
 bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigned height,
                          float* pixelX, float* pixelY);
+void androidXrSetUiPanelFixed();
+bool androidXrAttachUiPanelToHand(const AndroidXrHandState& hand, unsigned handIndex);
 void androidXrSetUiPanelVisible(bool visible);
 void androidXrEndFrame(bool rendered);
 
