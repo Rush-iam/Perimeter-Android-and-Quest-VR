@@ -34,6 +34,7 @@ struct AndroidXrHandState {
 struct AndroidXrInputFrame {
     AndroidXrHandState hands[2]; // left, right
     bool focused = false;
+    bool recentered = false;
 };
 
 // Called after loading DXVK 2 and before Direct3DCreate9. The Android-only

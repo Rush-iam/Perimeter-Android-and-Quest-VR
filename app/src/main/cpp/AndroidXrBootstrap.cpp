@@ -85,6 +85,7 @@ struct Bootstrap {
     bool running = false;
     bool frameBegun = false;
     bool viewsValid = false;
+    XrTime recenterTime = 0;
     XrFrameState frameState{XR_TYPE_FRAME_STATE};
     XrView views[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
 };
@@ -93,6 +94,17 @@ Bootstrap bootstrap;
 std::atomic<bool> standbyStop{false};
 std::thread standbyThread;
 void logResult(const char* operation, XrResult result);
+
+void recordReferenceSpaceChange(const XrEventDataBuffer& event) {
+    const auto& change =
+        *reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&event);
+    if (change.session == bootstrap.session &&
+        change.referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) {
+        bootstrap.recenterTime = change.changeTime;
+        __android_log_write(ANDROID_LOG_INFO, "PerimeterXr",
+                            "LOCAL reference space recenter pending");
+    }
+}
 
 XrVector3f rotateByQuaternion(const XrQuaternionf& q, XrVector3f v) {
     const XrVector3f u{q.x, q.y, q.z};
@@ -298,6 +310,8 @@ void runStandbyFrames() {
                     }
                 }
             }
+            if (event.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING)
+                recordReferenceSpaceChange(event);
             event = {XR_TYPE_EVENT_DATA_BUFFER};
         }
         if (!state.running) {
@@ -528,11 +542,30 @@ void destroyPanelTarget() {
     target = Bootstrap::EyeTarget{};
 }
 
+void initializePanelPose() {
+    auto& state = bootstrap;
+    if (state.panelPoseInitialized || !state.viewsValid) return;
+    const auto& left = state.views[0].pose;
+    const auto& right = state.views[1].pose;
+    state.panelPose.orientation = left.orientation;
+    XrVector3f center{(left.position.x + right.position.x) * 0.5f,
+                      (left.position.y + right.position.y) * 0.5f,
+                      (left.position.z + right.position.z) * 0.5f};
+    const XrVector3f forward = rotateByQuaternion(state.panelPose.orientation, {0, 0, -1});
+    const XrVector3f up = rotateByQuaternion(state.panelPose.orientation, {0, 1, 0});
+    state.panelPose.position = {center.x + forward.x * 1.4f + up.x * 0.22f,
+                                center.y + forward.y * 1.4f + up.y * 0.22f,
+                                center.z + forward.z * 1.4f + up.z * 0.22f};
+    state.panelPoseInitialized = true;
+}
+
 bool ensurePanelTarget(uint32_t width, uint32_t height) {
     auto& state = bootstrap;
     if (state.panelReady) {
-        if (state.panelTarget.width == width && state.panelTarget.height == height)
+        if (state.panelTarget.width == width && state.panelTarget.height == height) {
+            initializePanelPose();
             return true;
+        }
         state.interop->FlushRenderingCommands();
         if (!state.interop->WaitForResource(state.panelTarget.resource, 0)) return false;
         destroyPanelTarget();
@@ -601,20 +634,7 @@ bool ensurePanelTarget(uint32_t width, uint32_t height) {
         reinterpret_cast<XrSwapchainImageBaseHeader*>(state.panelSwapchainImages.data())) != XR_SUCCESS)
         return cleanupPanelTarget();
 
-    if (!state.panelPoseInitialized) {
-        const auto& left = state.views[0].pose;
-        const auto& right = state.views[1].pose;
-        state.panelPose.orientation = left.orientation;
-        XrVector3f center{(left.position.x + right.position.x) * 0.5f,
-                          (left.position.y + right.position.y) * 0.5f,
-                          (left.position.z + right.position.z) * 0.5f};
-        const XrVector3f forward = rotateByQuaternion(state.panelPose.orientation, {0, 0, -1});
-        const XrVector3f up = rotateByQuaternion(state.panelPose.orientation, {0, 1, 0});
-        state.panelPose.position = {center.x + forward.x * 1.4f + up.x * 0.22f,
-                                    center.y + forward.y * 1.4f + up.y * 0.22f,
-                                    center.z + forward.z * 1.4f + up.z * 0.22f};
-        state.panelPoseInitialized = true;
-    }
+    initializePanelPose();
     state.panelReady = true;
     return true;
 }
@@ -791,6 +811,8 @@ bool androidXrBeginFrame(AndroidXrEyeView output[2], AndroidXrInputFrame* input)
                 state.focused = change.state == XR_SESSION_STATE_FOCUSED;
                 if (!state.focused) resetInputEdges();
             }
+        } else if (event.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+            recordReferenceSpaceChange(event);
         } else if (event.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
             state.running = false;
             state.focused = false;
@@ -828,6 +850,12 @@ bool androidXrBeginFrame(AndroidXrEyeView output[2], AndroidXrInputFrame* input)
         return false;
     }
     if (input) snapshotInput(input);
+    if (state.recenterTime &&
+        state.frameState.predictedDisplayTime >= state.recenterTime) {
+        if (input) input->recentered = true;
+        state.panelPoseInitialized = false;
+        state.recenterTime = 0;
+    }
     for (unsigned eye = 0; eye < 2; ++eye) {
         const auto& view = state.views[eye];
         output[eye] = {{view.pose.position.x, view.pose.position.y, view.pose.position.z},
@@ -1206,6 +1234,7 @@ void androidXrBootstrapDestroySession() {
     }
     destroyPanelTarget();
     bootstrap.panelPoseInitialized = false;
+    bootstrap.recenterTime = 0;
     bootstrap.d3dDevice = nullptr;
     bootstrap.eyeFormat = VK_FORMAT_UNDEFINED;
     bootstrap.depthFormat = D3DFMT_UNKNOWN;

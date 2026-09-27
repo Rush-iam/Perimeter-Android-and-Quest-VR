@@ -10,7 +10,11 @@
 // instance must be used for eyes and controller rays during a frame.
 class XrCameraRig {
 public:
-    void BeginFrame(const AndroidXrEyeView views[2]) {
+    void BeginFrame(const AndroidXrEyeView views[2], bool recentered) {
+        if (recentered) {
+            anchored_ = false;
+            ResetTableManipulation();
+        }
         if (anchored_) return;
         for (int axis = 0; axis < 3; ++axis)
             anchor_[axis] = (views[0].position[axis] + views[1].position[axis]) * 0.5f;
