@@ -30,22 +30,9 @@ public:
             for (int column = 0; column < 3; ++column)
                 engineRotation[row][column] *=
                     (row == 2 ? -1.0f : 1.0f) * (column == 2 ? -1.0f : 1.0f);
-        const Mat3f yaw(QuatF(std::cos(yaw_ * 0.5f), 0.0f,
-                              std::sin(yaw_ * 0.5f), 0.0f));
         const Vect3f relative(position[0] - anchor_[0], position[1] - anchor_[1],
                               -(position[2] - anchor_[2]));
-        return MatXf(yaw * engineRotation, offset_ + yaw * (relative * unitsPerMeter_));
-    }
-
-    // Rotate around a point already expressed in the rig's engine coordinates.
-    void SetYawAroundPoint(float radians, const Vect3f& pivot) {
-        const Mat3f inverseYaw(QuatF(std::cos(yaw_ * 0.5f), 0.0f,
-                                     -std::sin(yaw_ * 0.5f), 0.0f));
-        const Vect3f fromPivot = inverseYaw * (pivot - offset_);
-        yaw_ = radians;
-        const Mat3f yaw(QuatF(std::cos(yaw_ * 0.5f), 0.0f,
-                              std::sin(yaw_ * 0.5f), 0.0f));
-        offset_ = pivot - yaw * fromPivot;
+        return MatXf(engineRotation, offset_ + relative * unitsPerMeter_);
     }
 
     // A 2x tabletop enlargement moves the selected pivot 1.8x farther in XR,
@@ -63,10 +50,9 @@ public:
         offset_ += desiredHead - Pose(headPosition, identity).trans();
     }
 
-    bool NeedsTablePivot(const float rightStick[2], bool rightActive) const {
+    bool NeedsTablePivot(float scaleStickY, bool rightActive) const {
         return rightActive && !tablePivotLatched_ &&
-            (std::abs(rightStick[0]) > stickDeadzone_ ||
-             std::abs(rightStick[1]) > stickDeadzone_);
+            std::abs(scaleStickY) > stickDeadzone_;
     }
 
     void ResetTableManipulation() {
@@ -75,7 +61,7 @@ public:
     }
 
     void UpdateControls(const float leftStick[2], bool leftActive,
-                        const float rightStick[2], bool rightActive,
+                        float scaleStickY, bool rightActive,
                         float deltaSeconds, const Vect3f& candidateWorldPivot,
                         const MatXf& centerWorld, const float headPosition[3]) {
         if (deltaSeconds <= 0.0f) return;
@@ -84,10 +70,8 @@ public:
             return std::copysign((std::abs(value) - stickDeadzone_) /
                                  (1.0f - stickDeadzone_), value);
         };
-        const float yawInput = rightActive ? applyDeadzone(rightStick[0]) : 0.0f;
-        const float scaleInput = rightActive ? applyDeadzone(rightStick[1]) : 0.0f;
-        const bool manipulating = yawInput != 0.0f || scaleInput != 0.0f;
-        if (manipulating) {
+        const float scaleInput = rightActive ? applyDeadzone(scaleStickY) : 0.0f;
+        if (scaleInput != 0.0f) {
             if (!tablePivotLatched_) {
                 tablePivotWorld_ = candidateWorldPivot;
                 tablePivotLatched_ = true;
@@ -103,31 +87,25 @@ public:
             const float x = applyDeadzone(leftStick[0]);
             const float y = applyDeadzone(leftStick[1]);
             if (x != 0.0f || y != 0.0f) {
-                const Mat3f yaw(QuatF(std::cos(yaw_ * 0.5f), 0.0f,
-                                      std::sin(yaw_ * 0.5f), 0.0f));
                 // Pan linearly with enlargement, but ease zoomed-out panning
                 // with a square-root response around the default scale.
                 const float tableScale = defaultUnitsPerMeter_ / unitsPerMeter_;
                 const float panScale = tableScale > 1.0f
                     ? tableScale : std::sqrt(tableScale);
-                offset_ += yaw * Vect3f(x, 0.0f, y) *
+                offset_ += Vect3f(x, 0.0f, y) *
                     (unitsPerMeter_ * panScale * 3.6f * deltaSeconds);
             }
         }
-        if (!manipulating) return;
+        if (scaleInput == 0.0f) return;
         MatXf worldToRig = centerWorld;
         worldToRig.invert();
         const Vect3f pivot = worldToRig * tablePivotWorld_;
-        if (yawInput != 0.0f)
-            SetYawAroundPoint(yaw_ + yawInput * 1.2f * deltaSeconds, pivot);
-        if (scaleInput != 0.0f) {
-            // Fewer engine units per tracking meter make the tabletop larger.
-            float unitsPerMeter = unitsPerMeter_ *
-                std::exp(-scaleInput * 2.1f * deltaSeconds);
-            if (unitsPerMeter < 12.5f) unitsPerMeter = 12.5f;
-            if (unitsPerMeter > 800.0f) unitsPerMeter = 800.0f;
-            SetScaleWithPivotDepth(unitsPerMeter, headPosition, pivot);
-        }
+        // Fewer engine units per tracking meter make the tabletop larger.
+        float unitsPerMeter = unitsPerMeter_ *
+            std::exp(-scaleInput * 2.1f * deltaSeconds);
+        if (unitsPerMeter < 12.5f) unitsPerMeter = 12.5f;
+        if (unitsPerMeter > 800.0f) unitsPerMeter = 800.0f;
+        SetScaleWithPivotDepth(unitsPerMeter, headPosition, pivot);
     }
 
 private:
@@ -136,7 +114,6 @@ private:
     bool anchored_ = false;
     float anchor_[3]{};
     float unitsPerMeter_ = defaultUnitsPerMeter_;
-    float yaw_ = 0.0f;
     Vect3f offset_ = Vect3f::ZERO;
     bool tablePivotLatched_ = false;
     float tablePivotIdleSeconds_ = 0.0f;
