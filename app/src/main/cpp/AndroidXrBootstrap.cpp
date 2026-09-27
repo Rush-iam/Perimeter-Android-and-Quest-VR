@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <thread>
 #include <vector>
@@ -44,9 +45,29 @@ struct Bootstrap {
     XrSystemId system = XR_NULL_SYSTEM_ID;
     XrSession session = XR_NULL_HANDLE;
     XrSpace localSpace = XR_NULL_HANDLE;
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrAction aimAction = XR_NULL_HANDLE;
+    XrAction thumbstickAction = XR_NULL_HANDLE;
+    XrAction buttonActions[5]{};
+    XrPath handPaths[2]{};
+    XrSpace aimSpaces[2]{};
+    unsigned previousHeld[2]{};
+    bool previousActive[2]{};
+    bool focused = false;
     XrSwapchain eyeSwapchains[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+    XrSwapchain panelSwapchain = XR_NULL_HANDLE;
     std::vector<XrSwapchainImageVulkan2KHR> swapchainImages[2];
+    std::vector<XrSwapchainImageVulkan2KHR> panelSwapchainImages;
     EyeTarget eyeTargets[2];
+    EyeTarget panelTarget;
+    IDirect3DDevice9* d3dDevice = nullptr;
+    D3DFORMAT depthFormat = D3DFMT_UNKNOWN;
+    VkFormat eyeFormat = VK_FORMAT_UNDEFINED;
+    XrPosef panelPose{{0, 0, 0, 1}, {0, 0, -1.4f}};
+    float panelWidthMeters = 1.2f;
+    bool panelReady = false;
+    bool panelPoseInitialized = false;
+    bool panelVisible = true;
     ID3D9VkInteropDevice* interop = nullptr;
     VkQueue graphicsQueue = VK_NULL_HANDLE;
     PFN_xrCreateVulkanInstanceKHR createInstance = nullptr;
@@ -66,13 +87,185 @@ struct Bootstrap {
     bool viewsValid = false;
     XrFrameState frameState{XR_TYPE_FRAME_STATE};
     XrView views[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
-    uint32_t frameCount = 0;
 };
 
 Bootstrap bootstrap;
 std::atomic<bool> standbyStop{false};
 std::thread standbyThread;
 void logResult(const char* operation, XrResult result);
+
+XrVector3f rotateByQuaternion(const XrQuaternionf& q, XrVector3f v) {
+    const XrVector3f u{q.x, q.y, q.z};
+    const float dotUV = u.x * v.x + u.y * v.y + u.z * v.z;
+    const float dotUU = u.x * u.x + u.y * u.y + u.z * u.z;
+    const XrVector3f cross{u.y * v.z - u.z * v.y,
+                           u.z * v.x - u.x * v.z,
+                           u.x * v.y - u.y * v.x};
+    return {2.0f * dotUV * u.x + (q.w * q.w - dotUU) * v.x + 2.0f * q.w * cross.x,
+            2.0f * dotUV * u.y + (q.w * q.w - dotUU) * v.y + 2.0f * q.w * cross.y,
+            2.0f * dotUV * u.z + (q.w * q.w - dotUU) * v.z + 2.0f * q.w * cross.z};
+}
+
+bool createInputActions() {
+    auto& state = bootstrap;
+    const char* handNames[2] = {"/user/hand/left", "/user/hand/right"};
+    for (unsigned hand = 0; hand < 2; ++hand)
+        if (xrStringToPath(state.instance, handNames[hand], &state.handPaths[hand]) != XR_SUCCESS)
+            return false;
+    XrActionSetCreateInfo setInfo{XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::snprintf(setInfo.actionSetName, sizeof(setInfo.actionSetName), "gameplay");
+    std::snprintf(setInfo.localizedActionSetName, sizeof(setInfo.localizedActionSetName), "Gameplay");
+    setInfo.priority = 0;
+    if (xrCreateActionSet(state.instance, &setInfo, &state.actionSet) != XR_SUCCESS) return false;
+    const auto makeAction = [&](XrAction& action, XrActionType type,
+                                const char* name, const char* label) {
+        XrActionCreateInfo info{XR_TYPE_ACTION_CREATE_INFO};
+        info.actionType = type;
+        std::snprintf(info.actionName, sizeof(info.actionName), "%s", name);
+        std::snprintf(info.localizedActionName, sizeof(info.localizedActionName), "%s", label);
+        info.countSubactionPaths = 2;
+        info.subactionPaths = state.handPaths;
+        return xrCreateAction(state.actionSet, &info, &action) == XR_SUCCESS;
+    };
+    if (!makeAction(state.aimAction, XR_ACTION_TYPE_POSE_INPUT, "aim_pose", "Aim pose") ||
+        !makeAction(state.thumbstickAction, XR_ACTION_TYPE_VECTOR2F_INPUT,
+                    "table_control", "Table control") ||
+        !makeAction(state.buttonActions[0], XR_ACTION_TYPE_BOOLEAN_INPUT, "select", "Select") ||
+        !makeAction(state.buttonActions[1], XR_ACTION_TYPE_BOOLEAN_INPUT, "command", "Command") ||
+        !makeAction(state.buttonActions[2], XR_ACTION_TYPE_BOOLEAN_INPUT, "menu", "Menu") ||
+        !makeAction(state.buttonActions[3], XR_ACTION_TYPE_BOOLEAN_INPUT, "cancel", "Cancel") ||
+        !makeAction(state.buttonActions[4], XR_ACTION_TYPE_BOOLEAN_INPUT, "rotate", "Rotate"))
+        return false;
+
+    XrPath profile = XR_NULL_PATH;
+    if (xrStringToPath(state.instance, "/interaction_profiles/oculus/touch_controller", &profile)
+        != XR_SUCCESS) return false;
+    struct Binding { XrAction action; const char* path; };
+    const Binding paths[] = {
+        {state.aimAction, "/user/hand/left/input/aim/pose"},
+        {state.aimAction, "/user/hand/right/input/aim/pose"},
+        {state.thumbstickAction, "/user/hand/left/input/thumbstick"},
+        {state.thumbstickAction, "/user/hand/right/input/thumbstick"},
+        {state.buttonActions[0], "/user/hand/left/input/trigger/value"},
+        {state.buttonActions[0], "/user/hand/right/input/trigger/value"},
+        {state.buttonActions[1], "/user/hand/left/input/squeeze/value"},
+        {state.buttonActions[1], "/user/hand/right/input/squeeze/value"},
+        {state.buttonActions[2], "/user/hand/left/input/menu/click"},
+        {state.buttonActions[2], "/user/hand/right/input/a/click"},
+        {state.buttonActions[3], "/user/hand/left/input/y/click"},
+        {state.buttonActions[3], "/user/hand/right/input/b/click"},
+        {state.buttonActions[4], "/user/hand/left/input/x/click"},
+        {state.buttonActions[4], "/user/hand/right/input/thumbstick/click"},
+    };
+    std::vector<XrActionSuggestedBinding> bindings;
+    bindings.reserve(sizeof(paths) / sizeof(paths[0]));
+    for (const auto& binding : paths) {
+        XrPath path = XR_NULL_PATH;
+        if (xrStringToPath(state.instance, binding.path, &path) != XR_SUCCESS) return false;
+        bindings.push_back({binding.action, path});
+    }
+    XrInteractionProfileSuggestedBinding suggestion{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestion.interactionProfile = profile;
+    suggestion.countSuggestedBindings = static_cast<uint32_t>(bindings.size());
+    suggestion.suggestedBindings = bindings.data();
+    const XrResult result = xrSuggestInteractionProfileBindings(state.instance, &suggestion);
+    logResult("xrSuggestInteractionProfileBindings(Touch)", result);
+    return result == XR_SUCCESS;
+}
+
+bool attachInputActions() {
+    auto& state = bootstrap;
+    XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attach.countActionSets = 1;
+    attach.actionSets = &state.actionSet;
+    if (xrAttachSessionActionSets(state.session, &attach) != XR_SUCCESS) return false;
+    for (unsigned hand = 0; hand < 2; ++hand) {
+        XrActionSpaceCreateInfo info{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+        info.subactionPath = state.handPaths[hand];
+        info.poseInActionSpace.orientation.w = 1.0f;
+        info.action = state.aimAction;
+        if (xrCreateActionSpace(state.session, &info, &state.aimSpaces[hand]) != XR_SUCCESS)
+            return false;
+    }
+    return true;
+}
+
+void resetInputEdges() {
+    auto& state = bootstrap;
+    for (unsigned hand = 0; hand < 2; ++hand) {
+        state.previousHeld[hand] = 0;
+        state.previousActive[hand] = false;
+    }
+}
+
+void snapshotInput(AndroidXrInputFrame* output) {
+    auto& state = bootstrap;
+    *output = {};
+    output->focused = state.focused;
+    if (!state.focused) { resetInputEdges(); return; }
+    XrActiveActionSet active{state.actionSet, XR_NULL_PATH};
+    XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
+    sync.countActiveActionSets = 1;
+    sync.activeActionSets = &active;
+    if (xrSyncActions(state.session, &sync) != XR_SUCCESS) {
+        resetInputEdges();
+        return;
+    }
+    for (unsigned hand = 0; hand < 2; ++hand) {
+        auto& value = output->hands[hand];
+        XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
+        get.subactionPath = state.handPaths[hand];
+        XrActionStatePose aim{XR_TYPE_ACTION_STATE_POSE};
+        get.action = state.aimAction;
+        if (xrGetActionStatePose(state.session, &get, &aim) != XR_SUCCESS || !aim.isActive) {
+            state.previousActive[hand] = false;
+            state.previousHeld[hand] = 0;
+            continue;
+        }
+        XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+        if (xrLocateSpace(state.aimSpaces[hand], state.localSpace,
+                          state.frameState.predictedDisplayTime, &location) != XR_SUCCESS) {
+            state.previousActive[hand] = false;
+            state.previousHeld[hand] = 0;
+            continue;
+        }
+        const XrSpaceLocationFlags valid = XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                                           XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        value.aimValid = (location.locationFlags & valid) == valid;
+        if (!value.aimValid) {
+            state.previousActive[hand] = false;
+            state.previousHeld[hand] = 0;
+            continue;
+        }
+        const auto& p = location.pose;
+        value.aimPosition[0] = p.position.x; value.aimPosition[1] = p.position.y;
+        value.aimPosition[2] = p.position.z;
+        value.aimOrientation[0] = p.orientation.x; value.aimOrientation[1] = p.orientation.y;
+        value.aimOrientation[2] = p.orientation.z; value.aimOrientation[3] = p.orientation.w;
+        get.action = state.thumbstickAction;
+        XrActionStateVector2f thumbstick{XR_TYPE_ACTION_STATE_VECTOR2F};
+        if (xrGetActionStateVector2f(state.session, &get, &thumbstick) == XR_SUCCESS &&
+            thumbstick.isActive) {
+            value.thumbstick[0] = thumbstick.currentState.x;
+            value.thumbstick[1] = thumbstick.currentState.y;
+            value.thumbstickActive = true;
+        }
+        unsigned held = 0;
+        for (unsigned button = 0; button < 5; ++button) {
+            get.action = state.buttonActions[button];
+            XrActionStateBoolean buttonState{XR_TYPE_ACTION_STATE_BOOLEAN};
+            if (xrGetActionStateBoolean(state.session, &get, &buttonState) == XR_SUCCESS &&
+                buttonState.isActive && buttonState.currentState)
+                held |= 1u << button;
+        }
+        if (state.previousActive[hand]) {
+            value.pressed = held & ~state.previousHeld[hand];
+            value.released = state.previousHeld[hand] & ~held;
+        }
+        state.previousHeld[hand] = held;
+        state.previousActive[hand] = true;
+    }
+}
 
 struct QueueLock {
     explicit QueueLock(ID3D9VkInteropDevice* device) : interop(device) {
@@ -84,7 +277,6 @@ struct QueueLock {
 
 void runStandbyFrames() {
     auto& state = bootstrap;
-    uint32_t frames = 0;
     while (!standbyStop.load()) {
         XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
         XrResult result;
@@ -92,6 +284,8 @@ void runStandbyFrames() {
             if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
                 const auto& change = *reinterpret_cast<const XrEventDataSessionStateChanged*>(&event);
                 if (change.session == state.session) {
+                    state.focused = change.state == XR_SESSION_STATE_FOCUSED;
+                    if (!state.focused) resetInputEdges();
                     if (change.state == XR_SESSION_STATE_READY && !state.running) {
                         XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO};
                         begin.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -121,15 +315,13 @@ void runStandbyFrames() {
         end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         { QueueLock lock(state.interop); result = xrEndFrame(state.session, &end); }
         if (result != XR_SUCCESS) break;
-        if (++frames % 120 == 0)
-            __android_log_print(ANDROID_LOG_INFO, "PerimeterXr", "standby frames=%u", frames);
     }
-    __android_log_print(ANDROID_LOG_INFO, "PerimeterXr", "standby stopped after %u frames", frames);
 }
 
 void logResult(const char* operation, XrResult result) {
-    __android_log_print(result == XR_SUCCESS ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
-        "PerimeterXr", "%s: XrResult=%d", operation, static_cast<int>(result));
+    if (result != XR_SUCCESS)
+        __android_log_print(ANDROID_LOG_ERROR, "PerimeterXr", "%s: XrResult=%d",
+                            operation, static_cast<int>(result));
 }
 
 bool loadProc(const char* name, PFN_xrVoidFunction* output) {
@@ -276,6 +468,8 @@ bool createEyes(IDirect3DDevice9* device) {
         if (imageInfo.format != eyeFormat) return false;
     }
     if (!success) return false;
+    state.eyeFormat = eyeFormat;
+    state.depthFormat = depthDesc.Format;
 
     XrSwapchainCreateInfo swapchainInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
@@ -300,10 +494,6 @@ bool createEyes(IDirect3DDevice9* device) {
         for (auto& image : images) image.type = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR;
         if (xrEnumerateSwapchainImages(state.eyeSwapchains[eye], imageCount, &imageCount,
             reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())) != XR_SUCCESS) return false;
-        __android_log_print(ANDROID_LOG_INFO, "PerimeterXr",
-            "eye %u: %ux%u format=%d swapchainImages=%u", eye,
-            state.eyeTargets[eye].width, state.eyeTargets[eye].height,
-            static_cast<int>(eyeFormat), imageCount);
     }
     VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -319,6 +509,113 @@ bool createEyes(IDirect3DDevice9* device) {
     VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     if (vkCreateFence(state.vulkanDevice, &fenceInfo, nullptr, &state.copyFence) != VK_SUCCESS)
         return false;
+    return true;
+}
+
+void destroyPanelTarget() {
+    auto& state = bootstrap;
+    state.panelReady = false;
+    state.panelSwapchainImages.clear();
+    if (state.panelSwapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(state.panelSwapchain);
+        state.panelSwapchain = XR_NULL_HANDLE;
+    }
+    auto& target = state.panelTarget;
+    if (target.interopImage) target.interopImage->Release();
+    if (target.depth) target.depth->Release();
+    if (target.surface) target.surface->Release();
+    if (target.resource) target.resource->Release();
+    target = Bootstrap::EyeTarget{};
+}
+
+bool ensurePanelTarget(uint32_t width, uint32_t height) {
+    auto& state = bootstrap;
+    if (state.panelReady) {
+        if (state.panelTarget.width == width && state.panelTarget.height == height)
+            return true;
+        state.interop->FlushRenderingCommands();
+        if (!state.interop->WaitForResource(state.panelTarget.resource, 0)) return false;
+        destroyPanelTarget();
+    }
+    if (!state.d3dDevice || !state.interop || !width || !height ||
+        state.eyeFormat == VK_FORMAT_UNDEFINED || state.depthFormat == D3DFMT_UNKNOWN)
+        return false;
+
+    auto& target = state.panelTarget;
+    target.width = width;
+    target.height = height;
+    const auto cleanupPanelTarget = [&]() {
+        destroyPanelTarget();
+        return false;
+    };
+    D3D9VkExtImageDesc desc{};
+    desc.Type = D3DRTYPE_TEXTURE;
+    desc.Width = width;
+    desc.Height = height;
+    desc.Depth = 1;
+    desc.MipLevels = 1;
+    desc.Usage = D3DUSAGE_RENDERTARGET;
+    desc.Format = D3DFMT_A8B8G8R8;
+    desc.Pool = D3DPOOL_DEFAULT;
+    desc.MultiSample = D3DMULTISAMPLE_NONE;
+    desc.ImageUsage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (FAILED(state.interop->CreateImage(&desc, &target.resource))) return cleanupPanelTarget();
+    auto* texture = static_cast<IDirect3DTexture9*>(target.resource);
+    if (FAILED(texture->GetSurfaceLevel(0, &target.surface)) ||
+        FAILED(state.d3dDevice->CreateDepthStencilSurface(width, height,
+            state.depthFormat, D3DMULTISAMPLE_NONE, 0, TRUE, &target.depth, nullptr)) ||
+        FAILED(target.resource->QueryInterface(__uuidof(ID3D9VkInteropTexture),
+            reinterpret_cast<void**>(&target.interopImage)))) return cleanupPanelTarget();
+
+    state.interop->FlushRenderingCommands();
+    VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    if (!state.interop->WaitForResource(target.resource, 0) ||
+        FAILED(target.interopImage->GetVulkanImageInfo(&target.image,
+            &target.originalLayout, &imageInfo)) || target.image == VK_NULL_HANDLE ||
+        target.originalLayout == VK_IMAGE_LAYOUT_UNDEFINED ||
+        imageInfo.extent.width != width || imageInfo.extent.height != height ||
+        imageInfo.format != state.eyeFormat ||
+        !(imageInfo.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return cleanupPanelTarget();
+
+    XrSwapchainCreateInfo swapchainInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
+                               XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+    swapchainInfo.format = static_cast<int64_t>(state.eyeFormat);
+    swapchainInfo.sampleCount = 1;
+    swapchainInfo.faceCount = 1;
+    swapchainInfo.arraySize = 1;
+    swapchainInfo.mipCount = 1;
+    swapchainInfo.width = width;
+    swapchainInfo.height = height;
+    XrResult result = xrCreateSwapchain(state.session, &swapchainInfo,
+                                        &state.panelSwapchain);
+    logResult("xrCreateSwapchain(panel)", result);
+    if (result != XR_SUCCESS) return cleanupPanelTarget();
+    uint32_t imageCount = 0;
+    if (xrEnumerateSwapchainImages(state.panelSwapchain, 0, &imageCount, nullptr) != XR_SUCCESS ||
+        !imageCount) return cleanupPanelTarget();
+    state.panelSwapchainImages.resize(imageCount);
+    for (auto& image : state.panelSwapchainImages)
+        image.type = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR;
+    if (xrEnumerateSwapchainImages(state.panelSwapchain, imageCount, &imageCount,
+        reinterpret_cast<XrSwapchainImageBaseHeader*>(state.panelSwapchainImages.data())) != XR_SUCCESS)
+        return cleanupPanelTarget();
+
+    if (!state.panelPoseInitialized) {
+        const auto& left = state.views[0].pose;
+        const auto& right = state.views[1].pose;
+        state.panelPose.orientation = left.orientation;
+        XrVector3f center{(left.position.x + right.position.x) * 0.5f,
+                          (left.position.y + right.position.y) * 0.5f,
+                          (left.position.z + right.position.z) * 0.5f};
+        const XrVector3f forward = rotateByQuaternion(state.panelPose.orientation, {0, 0, -1});
+        const XrVector3f up = rotateByQuaternion(state.panelPose.orientation, {0, 1, 0});
+        state.panelPose.position = {center.x + forward.x * 1.4f + up.x * 0.22f,
+                                    center.y + forward.y * 1.4f + up.y * 0.22f,
+                                    center.z + forward.z * 1.4f + up.z * 0.22f};
+        state.panelPoseInitialized = true;
+    }
+    state.panelReady = true;
     return true;
 }
 
@@ -369,7 +666,7 @@ bool androidXrBootstrapInitialize(void* dxvkHandle) {
     systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     result = xrGetSystem(bootstrap.instance, &systemInfo, &bootstrap.system);
     logResult("xrGetSystem", result);
-    if (result != XR_SUCCESS ||
+    if (result != XR_SUCCESS || !createInputActions() ||
         !loadProc("xrCreateVulkanInstanceKHR",
             reinterpret_cast<PFN_xrVoidFunction*>(&bootstrap.createInstance)) ||
         !loadProc("xrGetVulkanGraphicsDevice2KHR",
@@ -400,8 +697,9 @@ bool androidXrBootstrapInitialize(void* dxvkHandle) {
     hooks.selectPhysicalDevice = &selectVkDevice;
     hooks.createDevice = &createVkDevice;
     bootstrap.hooksInstalled = setHooks(&hooks);
-    __android_log_print(bootstrap.hooksInstalled ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
-        "PerimeterXr", "DXVK/OpenXR creation hooks installed=%d", bootstrap.hooksInstalled);
+    if (!bootstrap.hooksInstalled)
+        __android_log_write(ANDROID_LOG_ERROR, "PerimeterXr",
+                            "DXVK/OpenXR creation hooks could not be installed");
     return bootstrap.hooksInstalled;
 }
 
@@ -420,6 +718,7 @@ bool androidXrBootstrapCreateSession(IDirect3DDevice9* device) {
             "D3D9 Vulkan interop unavailable: HRESULT=0x%08x", static_cast<unsigned>(queryResult));
         return false;
     }
+    bootstrap.d3dDevice = device;
     uint32_t queueIndex = UINT32_MAX;
     uint32_t queueFamily = UINT32_MAX;
     bootstrap.interop->GetSubmissionQueue(&bootstrap.graphicsQueue, &queueIndex, &queueFamily);
@@ -453,6 +752,11 @@ bool androidXrBootstrapCreateSession(IDirect3DDevice9* device) {
         androidXrBootstrapDestroySession();
         return false;
     }
+    if (!attachInputActions()) {
+        __android_log_write(ANDROID_LOG_ERROR, "PerimeterXr", "XR input actions unavailable");
+        androidXrBootstrapDestroySession();
+        return false;
+    }
     if (!createEyes(device)) {
         __android_log_write(ANDROID_LOG_ERROR, "PerimeterXr", "XR eye allocation failed");
         androidXrBootstrapDestroySession();
@@ -463,8 +767,10 @@ bool androidXrBootstrapCreateSession(IDirect3DDevice9* device) {
     return true;
 }
 
-bool androidXrBeginFrame(AndroidXrEyeView output[2]) {
+bool androidXrBeginFrame(AndroidXrEyeView output[2], AndroidXrInputFrame* input) {
     auto& state = bootstrap;
+    if (input) *input = {};
+    state.viewsValid = false;
     if (!state.session || !output) return false;
     standbyStop.store(true);
     if (standbyThread.joinable()) standbyThread.join();
@@ -474,7 +780,6 @@ bool androidXrBeginFrame(AndroidXrEyeView output[2]) {
         if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
             const auto& change = *reinterpret_cast<const XrEventDataSessionStateChanged*>(&event);
             if (change.session == state.session) {
-                __android_log_print(ANDROID_LOG_INFO, "PerimeterXr", "session state=%d", change.state);
                 if (change.state == XR_SESSION_STATE_READY && !state.running) {
                     XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO};
                     begin.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -483,9 +788,13 @@ bool androidXrBeginFrame(AndroidXrEyeView output[2]) {
                     xrEndSession(state.session);
                     state.running = false;
                 }
+                state.focused = change.state == XR_SESSION_STATE_FOCUSED;
+                if (!state.focused) resetInputEdges();
             }
         } else if (event.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
             state.running = false;
+            state.focused = false;
+            resetInputEdges();
         }
         event = {XR_TYPE_EVENT_DATA_BUFFER};
     }
@@ -514,9 +823,11 @@ bool androidXrBeginFrame(AndroidXrEyeView output[2]) {
             XR_VIEW_STATE_POSITION_VALID_BIT)) ==
         (XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT);
     if (!state.viewsValid) {
+        resetInputEdges();
         androidXrEndFrame(false);
         return false;
     }
+    if (input) snapshotInput(input);
     for (unsigned eye = 0; eye < 2; ++eye) {
         const auto& view = state.views[eye];
         output[eye] = {{view.pose.position.x, view.pose.position.y, view.pose.position.z},
@@ -526,6 +837,14 @@ bool androidXrBeginFrame(AndroidXrEyeView output[2]) {
             state.eyeTargets[eye].width, state.eyeTargets[eye].height};
     }
     return true;
+}
+
+bool androidXrIsFocused() {
+    return bootstrap.focused && bootstrap.viewsValid;
+}
+
+bool androidXrSessionActive() {
+    return bootstrap.session != XR_NULL_HANDLE;
 }
 
 bool androidXrBindEye(cInterfaceRenderDevice* renderer, unsigned eye) {
@@ -539,6 +858,80 @@ bool androidXrBindEye(cInterfaceRenderDevice* renderer, unsigned eye) {
 
 void androidXrUnbindEye(cInterfaceRenderDevice* renderer) {
     if (auto* d3d = dynamic_cast<cD3DRender*>(renderer)) d3d->SetFrameRenderTarget(nullptr, nullptr);
+}
+
+bool androidXrPrepareUiPanel(unsigned width, unsigned height) {
+    return bootstrap.frameBegun && bootstrap.viewsValid &&
+           ensurePanelTarget(width, height);
+}
+
+bool androidXrBeginUiPanel(cInterfaceRenderDevice* renderer, unsigned width, unsigned height) {
+    auto* d3d = dynamic_cast<cD3DRender*>(renderer);
+    if (!d3d || !androidXrPrepareUiPanel(width, height)) return false;
+    d3d->SetFrameRenderTarget(bootstrap.panelTarget.surface, bootstrap.panelTarget.depth);
+    D3DVIEWPORT9 viewport{0, 0, width, height, 0.0f, 1.0f};
+    if (FAILED(d3d->lpD3DDevice->SetViewport(&viewport))) {
+        d3d->SetFrameRenderTarget(nullptr, nullptr);
+        return false;
+    }
+    return true;
+}
+
+void androidXrRestoreUiPanelViewport(cInterfaceRenderDevice* renderer,
+                                     unsigned width, unsigned height) {
+    auto* d3d = dynamic_cast<cD3DRender*>(renderer);
+    if (!d3d || !d3d->frameColorTarget || !width || !height) return;
+    D3DVIEWPORT9 viewport{0, 0, width, height, 0.0f, 1.0f};
+    d3d->lpD3DDevice->SetViewport(&viewport);
+    d3d->SetClipRect(0, 0, static_cast<int>(width), static_cast<int>(height));
+}
+
+void androidXrEndUiPanel(cInterfaceRenderDevice* renderer) {
+    if (auto* d3d = dynamic_cast<cD3DRender*>(renderer)) {
+        d3d->SetFrameRenderTarget(nullptr, nullptr);
+        D3DVIEWPORT9 viewport{0, 0,
+            static_cast<DWORD>(d3d->GetSizeX()), static_cast<DWORD>(d3d->GetSizeY()),
+            0.0f, 1.0f};
+        d3d->lpD3DDevice->SetViewport(&viewport);
+    }
+}
+
+bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigned height,
+                         float* pixelX, float* pixelY) {
+    const auto& state = bootstrap;
+    if (!state.panelReady || !state.panelVisible || !hand.aimValid ||
+        !width || !height || !pixelX || !pixelY) return false;
+    const XrVector3f origin{hand.aimPosition[0], hand.aimPosition[1], hand.aimPosition[2]};
+    const XrQuaternionf aimOrientation{hand.aimOrientation[0], hand.aimOrientation[1],
+                                       hand.aimOrientation[2], hand.aimOrientation[3]};
+    const XrVector3f direction = rotateByQuaternion(aimOrientation, {0, 0, -1});
+    const XrVector3f normal = rotateByQuaternion(state.panelPose.orientation, {0, 0, 1});
+    const XrVector3f offset{state.panelPose.position.x - origin.x,
+                            state.panelPose.position.y - origin.y,
+                            state.panelPose.position.z - origin.z};
+    const float denominator = direction.x * normal.x + direction.y * normal.y +
+                              direction.z * normal.z;
+    if (denominator >= -1.0e-5f) return false;
+    const float distance = (offset.x * normal.x + offset.y * normal.y +
+                            offset.z * normal.z) / denominator;
+    if (distance <= 0.0f) return false;
+    const XrVector3f relative{origin.x + direction.x * distance - state.panelPose.position.x,
+                              origin.y + direction.y * distance - state.panelPose.position.y,
+                              origin.z + direction.z * distance - state.panelPose.position.z};
+    const XrQuaternionf inverse{-state.panelPose.orientation.x, -state.panelPose.orientation.y,
+                                -state.panelPose.orientation.z, state.panelPose.orientation.w};
+    const XrVector3f local = rotateByQuaternion(inverse, relative);
+    const float panelHeight = state.panelWidthMeters *
+        static_cast<float>(state.panelTarget.height) / state.panelTarget.width;
+    if (std::abs(local.x) > state.panelWidthMeters * 0.5f ||
+        std::abs(local.y) > panelHeight * 0.5f) return false;
+    *pixelX = (local.x / state.panelWidthMeters + 0.5f) * width;
+    *pixelY = (0.5f - local.y / panelHeight) * height;
+    return true;
+}
+
+void androidXrSetUiPanelVisible(bool visible) {
+    bootstrap.panelVisible = visible;
 }
 
 void androidXrEndFrame(bool rendered) {
@@ -647,6 +1040,108 @@ void androidXrEndFrame(bool rendered) {
                 copied = false;
         }
     }
+    bool panelCopied = false;
+    if (copied && rendered && state.viewsValid && state.panelReady && state.panelVisible) {
+        auto& target = state.panelTarget;
+        const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        state.interop->TransitionTextureLayout(target.interopImage, &range,
+            target.originalLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        state.interop->FlushRenderingCommands();
+        panelCopied = state.interop->WaitForResource(target.resource, 0);
+        uint32_t index = 0;
+        bool acquiredPanel = false;
+        bool waitedPanel = false;
+        if (panelCopied) {
+            XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+            XrResult acquireResult;
+            { QueueLock lock(state.interop);
+              acquireResult = xrAcquireSwapchainImage(state.panelSwapchain, &acquire, &index); }
+            acquiredPanel = XR_SUCCEEDED(acquireResult);
+            panelCopied = acquireResult == XR_SUCCESS && index < state.panelSwapchainImages.size();
+            if (!panelCopied) logResult("xrAcquireSwapchainImage(panel)", acquireResult);
+        }
+        if (panelCopied) {
+            XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+            wait.timeout = XR_INFINITE_DURATION;
+            const XrResult waitResult = xrWaitSwapchainImage(state.panelSwapchain, &wait);
+            waitedPanel = waitResult == XR_SUCCESS;
+            panelCopied = waitedPanel;
+            if (!panelCopied) logResult("xrWaitSwapchainImage(panel)", waitResult);
+        }
+        if (panelCopied) {
+            panelCopied = vkResetCommandBuffer(state.copyCommand, 0) == VK_SUCCESS;
+            VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            panelCopied &= vkBeginCommandBuffer(state.copyCommand, &begin) == VK_SUCCESS;
+            if (panelCopied) {
+                VkImageMemoryBarrier barriers[2]{};
+                for (auto& barrier : barriers) {
+                    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    barrier.subresourceRange = range;
+                }
+                barriers[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+                barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                barriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                barriers[0].image = target.image;
+                barriers[1].srcAccessMask = 0;
+                barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                barriers[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                barriers[1].image = state.panelSwapchainImages[index].image;
+                vkCmdPipelineBarrier(state.copyCommand, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, barriers);
+                VkImageCopy copy{};
+                copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                copy.extent = {target.width, target.height, 1};
+                vkCmdCopyImage(state.copyCommand, target.image,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, barriers[1].image,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+                barriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                barriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                barriers[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                barriers[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                vkCmdPipelineBarrier(state.copyCommand, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
+                    1, &barriers[1]);
+            }
+            panelCopied &= vkEndCommandBuffer(state.copyCommand) == VK_SUCCESS;
+            if (panelCopied) panelCopied = vkResetFences(state.vulkanDevice, 1,
+                                                          &state.copyFence) == VK_SUCCESS;
+            if (panelCopied) {
+                VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                submit.commandBufferCount = 1;
+                submit.pCommandBuffers = &state.copyCommand;
+                { QueueLock lock(state.interop);
+                  panelCopied = vkQueueSubmit(state.graphicsQueue, 1, &submit,
+                                               state.copyFence) == VK_SUCCESS; }
+                if (panelCopied) panelCopied = vkWaitForFences(state.vulkanDevice, 1,
+                    &state.copyFence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
+            }
+        }
+        state.interop->TransitionTextureLayout(target.interopImage, &range,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.originalLayout);
+        state.interop->FlushRenderingCommands();
+        panelCopied &= state.interop->WaitForResource(target.resource, 0);
+        if (acquiredPanel) {
+            if (!waitedPanel) {
+                XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+                wait.timeout = 1000000000;
+                waitedPanel = xrWaitSwapchainImage(state.panelSwapchain, &wait) == XR_SUCCESS;
+            }
+            if (waitedPanel) {
+                XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+                QueueLock lock(state.interop);
+                if (xrReleaseSwapchainImage(state.panelSwapchain, &release) != XR_SUCCESS)
+                    panelCopied = false;
+            } else {
+                panelCopied = false;
+            }
+        }
+    }
     XrCompositionLayerProjectionView projectionViews[2] = {
         {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
         {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
@@ -662,25 +1157,37 @@ void androidXrEndFrame(bool rendered) {
     projection.space = state.localSpace;
     projection.viewCount = 2;
     projection.views = projectionViews;
-    const auto* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quad.space = state.localSpace;
+    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    quad.subImage.swapchain = state.panelSwapchain;
+    quad.subImage.imageRect.extent = {static_cast<int32_t>(state.panelTarget.width),
+                                      static_cast<int32_t>(state.panelTarget.height)};
+    quad.pose = state.panelPose;
+    quad.size = {state.panelWidthMeters,
+        state.panelWidthMeters * static_cast<float>(state.panelTarget.height) /
+            static_cast<float>(state.panelTarget.width)};
+    const XrCompositionLayerBaseHeader* layers[2] = {
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
     XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
     end.displayTime = state.frameState.predictedDisplayTime;
     end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-    end.layerCount = copied ? 1 : 0;
-    end.layers = copied ? &layer : nullptr;
+    end.layerCount = copied ? (panelCopied ? 2 : 1) : 0;
+    end.layers = copied ? layers : nullptr;
     XrResult result;
     { QueueLock lock(state.interop); result = xrEndFrame(state.session, &end); }
     if (result != XR_SUCCESS) logResult("xrEndFrame", result);
     state.frameBegun = false;
-    if (++state.frameCount % 120 == 0)
-        __android_log_print(ANDROID_LOG_INFO, "PerimeterXr", "frames=%u copied=%d",
-            state.frameCount, copied);
 }
 
 void androidXrBootstrapDestroySession() {
     standbyStop.store(true);
     if (standbyThread.joinable()) standbyThread.join();
     if (bootstrap.frameBegun) androidXrEndFrame(false);
+    bootstrap.focused = false;
+    resetInputEdges();
     if (bootstrap.graphicsQueue && bootstrap.interop) {
         QueueLock lock(bootstrap.interop);
         vkQueueWaitIdle(bootstrap.graphicsQueue);
@@ -697,6 +1204,15 @@ void androidXrBootstrapDestroySession() {
         if (target.resource) target.resource->Release();
         target = Bootstrap::EyeTarget{};
     }
+    destroyPanelTarget();
+    bootstrap.panelPoseInitialized = false;
+    bootstrap.d3dDevice = nullptr;
+    bootstrap.eyeFormat = VK_FORMAT_UNDEFINED;
+    bootstrap.depthFormat = D3DFMT_UNKNOWN;
+    for (unsigned hand = 0; hand < 2; ++hand) {
+        if (bootstrap.aimSpaces[hand]) xrDestroySpace(bootstrap.aimSpaces[hand]);
+        bootstrap.aimSpaces[hand] = XR_NULL_HANDLE;
+    }
     for (uint32_t eye = 0; eye < 2; ++eye) {
         bootstrap.swapchainImages[eye].clear();
         if (bootstrap.eyeSwapchains[eye] != XR_NULL_HANDLE)
@@ -711,11 +1227,11 @@ void androidXrBootstrapDestroySession() {
     bootstrap.interop = nullptr;
     bootstrap.graphicsQueue = VK_NULL_HANDLE;
     bootstrap.running = false;
-    bootstrap.frameCount = 0;
 }
 
 void androidXrBootstrapDestroy() {
     androidXrBootstrapDestroySession();
+    if (bootstrap.actionSet) xrDestroyActionSet(bootstrap.actionSet);
     if (bootstrap.hooksInstalled && bootstrap.resetHooks) bootstrap.resetHooks();
     if (bootstrap.instance != XR_NULL_HANDLE) xrDestroyInstance(bootstrap.instance);
     if (bootstrap.activity) {

@@ -13,17 +13,50 @@ struct AndroidXrEyeView {
     unsigned height;
 };
 
+enum AndroidXrButton : unsigned {
+    ANDROID_XR_SELECT = 1u << 0,
+    ANDROID_XR_COMMAND = 1u << 1,
+    ANDROID_XR_MENU = 1u << 2,
+    ANDROID_XR_CANCEL = 1u << 3,
+    ANDROID_XR_ROTATE = 1u << 4,
+};
+
+struct AndroidXrHandState {
+    float aimPosition[3]{};
+    float aimOrientation[4]{};
+    float thumbstick[2]{};
+    unsigned pressed = 0;
+    unsigned released = 0;
+    bool aimValid = false;
+    bool thumbstickActive = false;
+};
+
+struct AndroidXrInputFrame {
+    AndroidXrHandState hands[2]; // left, right
+    bool focused = false;
+};
+
 // Called after loading DXVK 2 and before Direct3DCreate9. The Android-only
 // bootstrap mediates DXVK's Vulkan creation through the active OpenXR runtime.
 bool androidXrBootstrapInitialize(void* dxvkHandle);
 
-// Called after the renderer's initial D3D9 reset. A non-XR launch is a no-op.
+// Called after the renderer's initial D3D9 reset.
 bool androidXrBootstrapCreateSession(IDirect3DDevice9* device);
 void androidXrBootstrapDestroySession();
 // Returns true only when a paced frame has valid tracked views to render.
-bool androidXrBeginFrame(AndroidXrEyeView views[2]);
+bool androidXrBeginFrame(AndroidXrEyeView views[2], AndroidXrInputFrame* input);
+bool androidXrIsFocused();
+bool androidXrSessionActive();
 bool androidXrBindEye(cInterfaceRenderDevice* renderer, unsigned eye);
 void androidXrUnbindEye(cInterfaceRenderDevice* renderer);
+bool androidXrPrepareUiPanel(unsigned width, unsigned height);
+bool androidXrBeginUiPanel(cInterfaceRenderDevice* renderer, unsigned width, unsigned height);
+void androidXrRestoreUiPanelViewport(cInterfaceRenderDevice* renderer,
+                                     unsigned width, unsigned height);
+void androidXrEndUiPanel(cInterfaceRenderDevice* renderer);
+bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigned height,
+                         float* pixelX, float* pixelY);
+void androidXrSetUiPanelVisible(bool visible);
 void androidXrEndFrame(bool rendered);
 
 // Called after the D3D9 device and interface have been released.
