@@ -60,7 +60,7 @@ public:
     }
 
     bool NeedsTablePivot(float scaleStickY, bool rightActive) const {
-        return rightActive && std::abs(scaleStickY) > stickDeadzone_;
+        return rightActive && scaleStickY != 0.0f;
     }
 
     void AlignOffsetToScriptedCamera(float durationSeconds) {
@@ -90,11 +90,6 @@ public:
                         float deltaSeconds, const Vect3f& currentWorldPivot,
                         const MatXf& centerWorld, const float headPosition[3],
                         const Vect3f& skyCenter, float skyRadius) {
-        const auto applyDeadzone = [](float value) {
-            if (std::abs(value) <= stickDeadzone_) return 0.0f;
-            return std::copysign((std::abs(value) - stickDeadzone_) /
-                                 (1.0f - stickDeadzone_), value);
-        };
         if (scriptedAlignmentActive_) {
             // Input must not overwrite the offset while it is aligning.
             leftActive = rightActive = false;
@@ -106,7 +101,7 @@ public:
             if (t >= 1.0f)
                 scriptedAlignmentActive_ = false;
         }
-        const float scaleInput = rightActive ? applyDeadzone(scaleStickY) : 0.0f;
+        const float scaleInput = rightActive ? scaleStickY : 0.0f;
         if (deltaSeconds <= 0.0f || deltaSeconds > 0.1f) return Vect3f::ZERO;
         Vect3f cameraPan = Vect3f::ZERO;
         // Project the tracked head's forward axis onto the game Z-up plane,
@@ -128,17 +123,17 @@ public:
             panHeadingValid_ = true;
         }
         if (leftActive) {
-            const float x = applyDeadzone(leftStick[0]);
-            const float y = applyDeadzone(leftStick[1]);
+            const float x = leftStick[0];
+            const float y = leftStick[1];
             if (x != 0.0f || y != 0.0f) {
-                // Pan linearly with enlargement, but ease zoomed-out panning
-                // with a cube-root response around the default scale.
-                const float tableScale = defaultUnitsPerMeter_ / unitsPerMeter_;
-                const float panScale = tableScale > 1.0f
-                    ? tableScale : std::cbrt(tableScale);
+                // Increase game-world speed gently when zoomed out; retain
+                // the default speed when the tabletop is enlarged.
+                const float zoomOutFactor = std::max(
+                    1.0f, unitsPerMeter_ / defaultUnitsPerMeter_);
                 const Vect3f right(-panForward_.y, panForward_.x, 0.0f);
                 const Vect3f worldPan = (right * x + panForward_ * y) *
-                    (unitsPerMeter_ * panScale * 5.4f * deltaSeconds);
+                    (panSpeedGameUnitsPerSecond_ * std::pow(zoomOutFactor, 0.25f) *
+                     deltaSeconds);
                 MatXf worldToRig = centerWorld;
                 worldToRig.invert();
                 cameraPan = worldToRig.rot() * worldPan;
@@ -195,8 +190,8 @@ public:
     }
 
 private:
-    static constexpr float stickDeadzone_ = 0.18f;
     static constexpr float defaultUnitsPerMeter_ = 100.0f;
+    static constexpr float panSpeedGameUnitsPerSecond_ = 540.0f;
     bool anchored_ = false;
     float anchor_[3]{};
     float headOrientation_[4]{0.0f, 0.0f, 0.0f, 1.0f};
