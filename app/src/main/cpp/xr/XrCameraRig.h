@@ -12,6 +12,17 @@
 class XrCameraRig {
 public:
     void BeginFrame(const AndroidXrEyeView views[2], bool recentered) {
+        const auto& left = views[0].orientation;
+        const auto& right = views[1].orientation;
+        const QuatF leftQuat(left[3], left[0], left[1], left[2]);
+        QuatF rightQuat(right[3], right[0], right[1], right[2]);
+        if (leftQuat.dot(rightQuat) < 0.0f) rightQuat.negate();
+        QuatF headQuat = leftQuat + rightQuat;
+        headQuat.normalize();
+        headOrientation_[0] = headQuat.x();
+        headOrientation_[1] = headQuat.y();
+        headOrientation_[2] = headQuat.z();
+        headOrientation_[3] = headQuat.s();
         if (recentered) anchored_ = false;
         if (anchored_) return;
         for (int axis = 0; axis < 3; ++axis)
@@ -98,6 +109,24 @@ public:
         const float scaleInput = rightActive ? applyDeadzone(scaleStickY) : 0.0f;
         if (deltaSeconds <= 0.0f || deltaSeconds > 0.1f) return Vect3f::ZERO;
         Vect3f cameraPan = Vect3f::ZERO;
+        // Project the tracked head's forward axis onto the game Z-up plane,
+        // after composing with the game camera. Tracking X/Z is not that plane
+        // when the tabletop camera is tilted.
+        const Mat3f headWorldRotation = centerWorld.rot() *
+            Pose(headPosition, headOrientation_).rot();
+        Vect3f forward = headWorldRotation * Vect3f(0.0f, 0.0f, 1.0f);
+        forward.z = 0.0f;
+        if (forward.norm2() > 0.0001f) {
+            forward.normalize();
+            panForward_ = forward;
+            panHeadingValid_ = true;
+        } else if (!panHeadingValid_) {
+            // If the first view is vertical, infer heading from head-right.
+            const Vect3f right = headWorldRotation * Vect3f(1.0f, 0.0f, 0.0f);
+            panForward_ = Vect3f(right.y, -right.x, 0.0f);
+            panForward_.normalize();
+            panHeadingValid_ = true;
+        }
         if (leftActive) {
             const float x = applyDeadzone(leftStick[0]);
             const float y = applyDeadzone(leftStick[1]);
@@ -107,8 +136,12 @@ public:
                 const float tableScale = defaultUnitsPerMeter_ / unitsPerMeter_;
                 const float panScale = tableScale > 1.0f
                     ? tableScale : std::cbrt(tableScale);
-                cameraPan = Vect3f(x, 0.0f, y) *
+                const Vect3f right(-panForward_.y, panForward_.x, 0.0f);
+                const Vect3f worldPan = (right * x + panForward_ * y) *
                     (unitsPerMeter_ * panScale * 5.4f * deltaSeconds);
+                MatXf worldToRig = centerWorld;
+                worldToRig.invert();
+                cameraPan = worldToRig.rot() * worldPan;
                 offset_ += cameraPan;
             }
         }
@@ -166,6 +199,9 @@ private:
     static constexpr float defaultUnitsPerMeter_ = 100.0f;
     bool anchored_ = false;
     float anchor_[3]{};
+    float headOrientation_[4]{0.0f, 0.0f, 0.0f, 1.0f};
+    Vect3f panForward_ = Vect3f::ZERO;
+    bool panHeadingValid_ = false;
     float unitsPerMeter_ = defaultUnitsPerMeter_;
     Vect3f offset_ = Vect3f::ZERO;
     Vect3f scriptedAlignmentStart_ = Vect3f::ZERO;
