@@ -52,7 +52,29 @@ public:
         return rightActive && std::abs(scaleStickY) > stickDeadzone_;
     }
 
-    void UpdateControls(const float leftStick[2], bool leftActive,
+    void AlignOffsetToScriptedCamera(float durationSeconds) {
+        if (durationSeconds <= 0.0f) {
+            offset_ = Vect3f::ZERO;
+            scriptedAlignmentActive_ = false;
+            return;
+        }
+        scriptedAlignmentStart_ = offset_;
+        scriptedAlignmentElapsed_ = 0.0f;
+        scriptedAlignmentDuration_ = durationSeconds;
+        scriptedAlignmentActive_ = true;
+    }
+
+    bool IsAligningToScriptedCamera() const { return scriptedAlignmentActive_; }
+
+    void RebaseCameraPan(const Vect3f& appliedLocalPan) {
+        // The game camera now carries this translation, so remove the same
+        // component from the XR offset without changing the rendered view.
+        offset_ -= appliedLocalPan;
+    }
+
+    // Return only this frame's bounded stick pan. Gameplay rebases it into
+    // the game camera; the menu can keep it entirely in the rig.
+    Vect3f UpdateControls(const float leftStick[2], bool leftActive,
                         float scaleStickY, bool rightActive,
                         float deltaSeconds, const Vect3f& currentWorldPivot,
                         const MatXf& centerWorld, const float headPosition[3],
@@ -62,8 +84,20 @@ public:
             return std::copysign((std::abs(value) - stickDeadzone_) /
                                  (1.0f - stickDeadzone_), value);
         };
+        if (scriptedAlignmentActive_) {
+            // Input must not overwrite the offset while it is aligning.
+            leftActive = rightActive = false;
+            scriptedAlignmentElapsed_ += std::max(deltaSeconds, 0.0f);
+            const float t = std::min(scriptedAlignmentElapsed_ /
+                                     scriptedAlignmentDuration_, 1.0f);
+            const float eased = t * t * (3.0f - 2.0f * t);
+            offset_ = scriptedAlignmentStart_ * (1.0f - eased);
+            if (t >= 1.0f)
+                scriptedAlignmentActive_ = false;
+        }
         const float scaleInput = rightActive ? applyDeadzone(scaleStickY) : 0.0f;
-        if (deltaSeconds <= 0.0f || deltaSeconds > 0.1f) return;
+        if (deltaSeconds <= 0.0f || deltaSeconds > 0.1f) return Vect3f::ZERO;
+        Vect3f cameraPan = Vect3f::ZERO;
         if (leftActive) {
             const float x = applyDeadzone(leftStick[0]);
             const float y = applyDeadzone(leftStick[1]);
@@ -73,8 +107,9 @@ public:
                 const float tableScale = defaultUnitsPerMeter_ / unitsPerMeter_;
                 const float panScale = tableScale > 1.0f
                     ? tableScale : std::cbrt(tableScale);
-                offset_ += Vect3f(x, 0.0f, y) *
+                cameraPan = Vect3f(x, 0.0f, y) *
                     (unitsPerMeter_ * panScale * 5.4f * deltaSeconds);
+                offset_ += cameraPan;
             }
         }
         if (scaleInput != 0.0f) {
@@ -88,7 +123,8 @@ public:
             if (unitsPerMeter > 800.0f) unitsPerMeter = 800.0f;
             SetScaleWithPivotDepth(unitsPerMeter, headPosition, pivot);
         }
-        if (skyRadius > 0.0f) {
+        // Scripted positions are authored independently of stick bounds.
+        if (skyRadius > 0.0f && (cameraPan.norm2() > 0.0f || scaleInput != 0.0f)) {
             // Bound stick movement of the table anchor, leaving natural head
             // motion untouched. Reserve room for a physical lean at any scale.
             const float margin = std::min(skyRadius * 0.25f,
@@ -98,9 +134,12 @@ public:
             // Clamp to the horizontal cross-section at the current height.
             // A 3D radial clamp pulls the camera downward at the upper edge.
             const float verticalDistanceSquared = fromCenter.z * fromCenter.z;
-            // There is no horizontal cross-section above the sphere. Do not
-            // snap the table to its center or alter its height in that case.
-            if (verticalDistanceSquared >= limit * limit) return;
+            // With no horizontal cross-section, reject stick pan while
+            // retaining the current height and scale placement.
+            if (verticalDistanceSquared >= limit * limit) {
+                offset_ -= cameraPan;
+                return Vect3f::ZERO;
+            }
             const float horizontalLimitSquared =
                 limit * limit - verticalDistanceSquared;
             const float horizontalDistanceSquared =
@@ -113,9 +152,13 @@ public:
                                           skyCenter.z + fromCenter.z);
                 MatXf worldToRig = centerWorld;
                 worldToRig.invert();
-                offset_ = worldToRig * boundedWorld;
+                const Vect3f boundedOffset = worldToRig * boundedWorld;
+                if (cameraPan.norm2() > 0.0f)
+                    cameraPan += boundedOffset - offset_;
+                offset_ = boundedOffset;
             }
         }
+        return cameraPan;
     }
 
 private:
@@ -125,6 +168,10 @@ private:
     float anchor_[3]{};
     float unitsPerMeter_ = defaultUnitsPerMeter_;
     Vect3f offset_ = Vect3f::ZERO;
+    Vect3f scriptedAlignmentStart_ = Vect3f::ZERO;
+    float scriptedAlignmentElapsed_ = 0.0f;
+    float scriptedAlignmentDuration_ = 0.0f;
+    bool scriptedAlignmentActive_ = false;
 };
 
 #endif

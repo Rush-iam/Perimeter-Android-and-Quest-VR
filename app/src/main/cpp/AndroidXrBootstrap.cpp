@@ -2,6 +2,8 @@
 
 #if defined(ANDROID_XR)
 
+#include "AndroidXrListenerPose.h"
+
 #include "StdAfxRD.h"
 #include "D3DRender.h"
 #include <d3d9_interfaces.h>
@@ -1303,6 +1305,7 @@ void androidXrEndFrame(bool rendered) {
 }
 
 void androidXrBootstrapDestroySession() {
+    androidXrClearListenerView();
     standbyStop.store(true);
     if (standbyThread.joinable()) standbyThread.join();
     if (bootstrap.frameBegun) androidXrEndFrame(false);
