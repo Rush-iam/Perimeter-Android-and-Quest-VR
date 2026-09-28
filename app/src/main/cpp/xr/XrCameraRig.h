@@ -44,18 +44,22 @@ public:
         return MatXf(engineRotation, offset_ + relative * unitsPerMeter_);
     }
 
-    // A 2x tabletop enlargement moves the current pivot 1.8x farther in XR,
-    // while preserving its direction from the head.
+    // Apply independently adjustable scale-depth compensation in the supplied
+    // direction, with equal terrain-plane and vertical movement components.
     void SetScaleWithPivotDepth(float unitsPerMeter, const float headPosition[3],
-                                const Vect3f& pivot) {
+                                const Vect3f& pivot, const Vect3f& scaleDirection) {
         if (unitsPerMeter == unitsPerMeter_) return;
         const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
         const Vect3f headBefore = Pose(headPosition, identity).trans();
         const float scaleRatio = unitsPerMeter_ / unitsPerMeter;
         constexpr float extraDepthExponent = -0.15200309f; // log2(1.8) - 1
-        const Vect3f desiredHead = pivot +
-            (headBefore - pivot) * std::pow(scaleRatio, extraDepthExponent);
+        const float depthDelta = (headBefore - pivot).norm() *
+            (1.0f - std::pow(scaleRatio, extraDepthExponent)) *
+            scaleMovementMultiplier_;
+        const Vect3f desiredHead = headBefore + scaleDirection * depthDelta;
         unitsPerMeter_ = unitsPerMeter;
+        // Compensate the changed scale of physical head displacement so only
+        // the intentional movement changes the head's world position.
         offset_ += desiredHead - Pose(headPosition, identity).trans();
     }
 
@@ -149,7 +153,13 @@ public:
                 std::exp(-scaleInput * 2.1f * deltaSeconds);
             if (unitsPerMeter < 12.5f) unitsPerMeter = 12.5f;
             if (unitsPerMeter > 800.0f) unitsPerMeter = 800.0f;
-            SetScaleWithPivotDepth(unitsPerMeter, headPosition, pivot);
+            // Zoom out moves backward and up; zoom in moves forward and down.
+            // World Z is perpendicular to terrain, regardless of camera tilt.
+            // Keep both components at the same speed rather than normalizing
+            // their combined direction.
+            const Vect3f scaleDirection = panForward_ - Vect3f(0.0f, 0.0f, 1.0f);
+            SetScaleWithPivotDepth(unitsPerMeter, headPosition, pivot,
+                                   worldToRig.rot() * scaleDirection);
         }
         // Scripted positions are authored independently of stick bounds.
         if (skyRadius > 0.0f && (cameraPan.norm2() > 0.0f || scaleInput != 0.0f)) {
@@ -192,6 +202,7 @@ public:
 private:
     static constexpr float defaultUnitsPerMeter_ = 100.0f;
     static constexpr float panSpeedGameUnitsPerSecond_ = 540.0f;
+    static constexpr float scaleMovementMultiplier_ = 0.5f;
     bool anchored_ = false;
     float anchor_[3]{};
     float headOrientation_[4]{0.0f, 0.0f, 0.0f, 1.0f};

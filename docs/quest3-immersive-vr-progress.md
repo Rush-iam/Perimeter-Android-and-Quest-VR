@@ -31,6 +31,8 @@ The precise gates and ordering are in the [delivery sequence](quest3-immersive-v
 
 ## Phase 3 implementation and verification
 
+The user accepted the revised right-stick scaling movement on Quest. Horizontal movement uses the normalized terrain-plane heading shared with the left stick, including its vertical-gaze fallback; vertical movement follows terrain-normal world Z. Zoom out moves backward/up, and zoom in moves forward/down. `scaleMovementMultiplier_ = 0.5` gives approximately 80 game units per second for each component at full deflection without changing the scale rate. Physical head displacement is compensated when scale changes so it adds no unintended movement. Left-stick movement still preserves height. Both release benchmark flavors built successfully; the updated Quest APK installed and relaunched Tutorial, with mission/main-loop confirmation and an active game process in the inspected logs.
+
 | Item | State | Evidence and remaining work |
 | --- | --- | --- |
 | P3-1 tabletop scale | Scale behavior accepted by user; other rig work remains | `XrCameraRig` applies bounded right-stick vertical scale to the shared tracking-to-world transform. `GameShell` recomputes a gaze pivot at a fixed 500-game-unit depth each frame during scaling; no world point is latched. The user reports that scaling works well. Eye, picking, placement and panel alignment across the full scale range, head listener pose, and disruptive legacy camera events remain to be reviewed. |
