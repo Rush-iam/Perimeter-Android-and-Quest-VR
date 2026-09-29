@@ -260,6 +260,10 @@ target_sources(perimeter PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/AndroidDxvkLoader.cpp")
 target_link_libraries(perimeter PRIVATE AndroidDxvk::Headers)
 if(PERIMETER_ANDROID_XR)
+    target_sources(UserInterface PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/xr/XrBuildingRay.cpp")
+    target_include_directories(UserInterface PRIVATE
+        "${PERIMETER_ROOT}/Source/Render/src")
     target_sources(perimeter PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/AndroidXrBootstrap.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/AndroidXrListenerPose.cpp")

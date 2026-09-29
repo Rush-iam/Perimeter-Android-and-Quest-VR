@@ -981,7 +981,7 @@ void androidXrEndUiPanel(cInterfaceRenderDevice* renderer) {
 }
 
 bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigned height,
-                         float* pixelX, float* pixelY) {
+                         float* pixelX, float* pixelY, float* distanceMeters) {
     const auto& state = bootstrap;
     if (!state.panelReady || !state.panelVisible || !hand.aimValid ||
         !width || !height || !pixelX || !pixelY) return false;
@@ -1011,6 +1011,7 @@ bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigne
         std::abs(local.y) > panelHeight * 0.5f) return false;
     *pixelX = (local.x / state.panelWidthMeters + 0.5f) * width;
     *pixelY = (0.5f - local.y / panelHeight) * height;
+    if (distanceMeters) *distanceMeters = distance;
     return true;
 }
 

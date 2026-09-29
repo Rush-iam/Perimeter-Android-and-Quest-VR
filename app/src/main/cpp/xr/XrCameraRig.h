@@ -81,6 +81,8 @@ public:
 
     bool IsAligningToScriptedCamera() const { return scriptedAlignmentActive_; }
 
+    float UnitsPerMeter() const { return unitsPerMeter_; }
+
     void RebaseCameraPan(const Vect3f& appliedLocalPan) {
         // The game camera now carries this translation, so remove the same
         // component from the XR offset without changing the rendered view.
