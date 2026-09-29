@@ -10,6 +10,6 @@ class QuestGameActivity : MainActivity() {
             // SDL's logical window drives UI layout, panel rendering, and pointer mapping.
             // Keep it independent of the headset's combined display dimensions and the
             // per-eye OpenXR targets, which use the runtime's recommended resolution.
-            holder.setFixedSize(1280, 960)
+            holder.setFixedSize(1024, 768)
         }
 }
