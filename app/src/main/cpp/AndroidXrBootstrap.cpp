@@ -27,6 +27,9 @@
 
 namespace {
 
+// Keep exported DXVK storage and OpenXR swapchains identical for direct copies.
+constexpr VkFormat xrColorFormat = VK_FORMAT_R8G8B8A8_SRGB;
+
 using SetHooksFn = bool (*)(const DxvkAndroidXrHooks*);
 using ResetHooksFn = void (*)();
 
@@ -66,7 +69,6 @@ struct Bootstrap {
     EyeTarget panelTarget;
     IDirect3DDevice9* d3dDevice = nullptr;
     D3DFORMAT depthFormat = D3DFMT_UNKNOWN;
-    VkFormat eyeFormat = VK_FORMAT_UNDEFINED;
     XrPosef panelPose{{0, 0, 0, 1}, {0, 0, -1.4f}};
     float panelWidthMeters = 1.2f;
     bool panelReady = false;
@@ -440,6 +442,15 @@ bool createEyes(IDirect3DDevice9* device) {
     std::vector<int64_t> formats(formatCount);
     if (xrEnumerateSwapchainFormats(state.session, formatCount, &formatCount,
                                     formats.data()) != XR_SUCCESS) return false;
+    // Quest DXVK interop targets use sRGB storage with UNORM rendering views.
+    // Copy display-encoded bytes unchanged between matching sRGB images so
+    // OpenXR decodes them before composition, without cross-format transfers.
+    if (std::find(formats.begin(), formats.end(),
+                  static_cast<int64_t>(xrColorFormat)) == formats.end()) {
+        __android_log_write(ANDROID_LOG_ERROR, "PerimeterXr",
+                            "OpenXR runtime does not support R8G8B8A8_SRGB swapchains");
+        return false;
+    }
     uint32_t viewCount = 0;
     if (xrEnumerateViewConfigurationViews(state.instance, state.system,
         XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &viewCount, nullptr) != XR_SUCCESS ||
@@ -459,7 +470,6 @@ bool createEyes(IDirect3DDevice9* device) {
     }
     D3DSURFACE_DESC depthDesc{};
     const bool depthInfoValid = SUCCEEDED(previousDepth->GetDesc(&depthDesc));
-    VkFormat eyeFormat = VK_FORMAT_UNDEFINED;
     bool success = depthInfoValid;
     for (uint32_t eye = 0; eye < 2 && success; ++eye) {
         auto& target = state.eyeTargets[eye];
@@ -505,19 +515,16 @@ bool createEyes(IDirect3DDevice9* device) {
             target.originalLayout != VK_IMAGE_LAYOUT_UNDEFINED &&
             imageInfo.extent.width == target.width && imageInfo.extent.height == target.height &&
             (imageInfo.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) &&
-            std::find(formats.begin(), formats.end(), static_cast<int64_t>(imageInfo.format)) != formats.end();
+            imageInfo.format == xrColorFormat;
         if (!success) break;
-        if (eyeFormat == VK_FORMAT_UNDEFINED) eyeFormat = imageInfo.format;
-        if (imageInfo.format != eyeFormat) return false;
     }
     if (!success) return false;
-    state.eyeFormat = eyeFormat;
     state.depthFormat = depthDesc.Format;
 
     XrSwapchainCreateInfo swapchainInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
                                XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-    swapchainInfo.format = static_cast<int64_t>(eyeFormat);
+    swapchainInfo.format = static_cast<int64_t>(xrColorFormat);
     swapchainInfo.sampleCount = 1;
     swapchainInfo.faceCount = 1;
     swapchainInfo.arraySize = 1;
@@ -617,7 +624,7 @@ bool ensurePanelTarget(uint32_t width, uint32_t height) {
         destroyPanelTarget();
     }
     if (!state.d3dDevice || !state.interop || !width || !height ||
-        state.eyeFormat == VK_FORMAT_UNDEFINED || state.depthFormat == D3DFMT_UNKNOWN)
+        state.depthFormat == D3DFMT_UNKNOWN)
         return false;
 
     auto& target = state.panelTarget;
@@ -653,13 +660,13 @@ bool ensurePanelTarget(uint32_t width, uint32_t height) {
             &target.originalLayout, &imageInfo)) || target.image == VK_NULL_HANDLE ||
         target.originalLayout == VK_IMAGE_LAYOUT_UNDEFINED ||
         imageInfo.extent.width != width || imageInfo.extent.height != height ||
-        imageInfo.format != state.eyeFormat ||
+        imageInfo.format != xrColorFormat ||
         !(imageInfo.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return cleanupPanelTarget();
 
     XrSwapchainCreateInfo swapchainInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
                                XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-    swapchainInfo.format = static_cast<int64_t>(state.eyeFormat);
+    swapchainInfo.format = static_cast<int64_t>(xrColorFormat);
     swapchainInfo.sampleCount = 1;
     swapchainInfo.faceCount = 1;
     swapchainInfo.arraySize = 1;
@@ -927,6 +934,9 @@ bool androidXrBindEye(cInterfaceRenderDevice* renderer, unsigned eye) {
     if (!d3d) return false;
     d3d->SetFrameRenderTarget(bootstrap.eyeTargets[eye].surface,
                               bootstrap.eyeTargets[eye].depth);
+    // The previous panel/frame leaves a UI-sized scissor rectangle behind.
+    renderer->SetClipRect(0, 0, static_cast<int>(bootstrap.eyeTargets[eye].width),
+                          static_cast<int>(bootstrap.eyeTargets[eye].height));
     return true;
 }
 
@@ -1333,7 +1343,6 @@ void androidXrBootstrapDestroySession() {
     bootstrap.panelWidthMeters = 1.2f;
     bootstrap.recenterTime = 0;
     bootstrap.d3dDevice = nullptr;
-    bootstrap.eyeFormat = VK_FORMAT_UNDEFINED;
     bootstrap.depthFormat = D3DFMT_UNKNOWN;
     for (unsigned hand = 0; hand < 2; ++hand) {
         if (bootstrap.aimSpaces[hand]) xrDestroySpace(bootstrap.aimSpaces[hand]);

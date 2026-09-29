@@ -8,7 +8,7 @@ import pathlib
 import sys
 
 if len(sys.argv) != 3:
-    raise SystemExit("Usage: patch_android_dxvk.py <source-dir> <native|v2>")
+    raise SystemExit("Usage: patch_android_dxvk.py <source-dir> <native|v2|v2-xr>")
 
 root = pathlib.Path(sys.argv[1])
 variant = sys.argv[2]
@@ -131,7 +131,26 @@ def patch_v2():
 
 
 def patch_v2_xr():
-    """Expose the Vulkan creation calls needed by OpenXR in the Quest probe."""
+    """Add Quest OpenXR creation hooks and matching sRGB export storage."""
+    replace("meson.build", "cpp = meson.get_compiler('cpp')",
+            "add_project_arguments('-DANDROID_XR=1', language: 'cpp')\n\ncpp = meson.get_compiler('cpp')")
+    # ImageUsage is supplied only by interop CreateImage (zero for normal
+    # D3D9 textures). Select exported RGBA8 targets without extra descriptor state
+    # or ABI changes; keep the UNORM rendering view and encoded bytes unchanged.
+    replace("src/d3d9/d3d9_common_texture.cpp",
+            "    const bool hasAttachmentFeedbackLoops =",
+            """#if defined(ANDROID_XR)
+    // Leave m_mapping and its UNORM/sRGB views unchanged. Render through the
+    // UNORM view, then copy identical-format sRGB storage into OpenXR images.
+    if (ResourceType == D3DRTYPE_TEXTURE
+     && m_desc.Format == D3D9Format::A8B8G8R8
+     && (m_desc.Usage & D3DUSAGE_RENDERTARGET)
+     && (m_desc.ImageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
+     && isMutable && isColorFormat)
+      imageInfo.format = m_mapping.FormatSrgb;
+#endif
+
+    const bool hasAttachmentFeedbackLoops =""")
     replace("src/d3d9/d3d9.sym",
             "    Direct3DCreate9;",
             "    Direct3DCreate9;\n    dxvkSetAndroidXrHooks;\n    dxvkResetAndroidXrHooks;")
