@@ -147,6 +147,8 @@ Use a semantic interaction context carrying world ray, hit position/object, modi
 
 Initially render existing menus/HUD into a texture on a movable world-space panel or OpenXR quad layer. Transform controller hits into its original pixel coordinates for UI events. World input must not fire through the panel. Keep selection markers, paths, brush footprints and placement previews in stereo world space. A 2D panel is appropriate for menus, not a substitute for stereo battlefield rendering.
 
+The tablet's Zeroplast and erase buttons also enable a world-space brush in the XR view. Prefer the right-hand aim ray, with the left hand as a tracking fallback, and retain the stroke's owning hand until trigger release. Show the terrain brush radius in both eyes; hold the trigger to paint and release it to send the existing region-change command. Match tablet brush bounds, add/erase operations, and replay restrictions. Suppress world painting over the tablet or without a terrain hit, and end strokes on tracking/focus loss, recenter, or camera-control locks. Cancel exits the tool. Keep ordinary selection and movement commands from consuming the same trigger input.
+
 Progressively replace dense HUD interactions with comfortable panels/radial commands and controller prompts. Keep text, targets and panel distance usable across seated/standing play and table scales. Provide all keyboard-dependent functions needed to complete a mission, including save/load, naming/text entry, mission dialogs, pause and exit. Compose may serve Android setup screens; it does not automatically become an XR panel.
 
 ## Android lifecycle and packaging
