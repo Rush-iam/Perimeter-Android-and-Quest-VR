@@ -72,6 +72,9 @@ struct Bootstrap {
     D3DFORMAT depthFormat = D3DFMT_UNKNOWN;
     XrPosef panelPose{{0, 0, 0, 1}, {0, 0, -1.4f}};
     float panelWidthMeters = 1.2f;
+    float panelDistanceMeters = 1.4f;
+    XrVector3f panelAnchor{};
+    XrVector3f panelForward{0.0f, 0.0f, -1.0f};
     bool panelReady = false;
     bool panelPoseInitialized = false;
     bool panelHandAttached = false;
@@ -650,9 +653,11 @@ void initializePanelPose() {
     const float halfYaw = 0.5f * std::atan2(-forward.x, -forward.z);
     state.panelPose.orientation = {0.0f, std::sin(halfYaw), 0.0f,
                                    std::cos(halfYaw)};
-    state.panelPose.position = {center.x + forward.x * 1.4f,
+    state.panelAnchor = center;
+    state.panelForward = {forward.x, 0.0f, forward.z};
+    state.panelPose.position = {center.x + state.panelForward.x * state.panelDistanceMeters,
                                 center.y,
-                                center.z + forward.z * 1.4f};
+                                center.z + state.panelForward.z * state.panelDistanceMeters};
     state.panelPoseInitialized = true;
 }
 
@@ -1074,13 +1079,29 @@ bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigne
 }
 
 void androidXrSetUiPanelFixed() {
+    androidXrSetUiPanelFixed(1.4f, 1.2f);
+}
+
+void androidXrSetUiPanelFixed(float distanceMeters, float widthMeters) {
     auto& state = bootstrap;
     if (state.panelHandAttached) {
         state.panelHandAttached = false;
         state.panelPoseInitialized = false;
-        state.panelWidthMeters = 1.2f;
     }
+    state.panelDistanceMeters = std::max(distanceMeters, 0.05f);
+    state.panelWidthMeters = std::max(widthMeters, 0.05f);
     initializePanelPose();
+    if (state.panelPoseInitialized) {
+        state.panelPose.position = {
+            state.panelAnchor.x + state.panelForward.x * state.panelDistanceMeters,
+            state.panelAnchor.y,
+            state.panelAnchor.z + state.panelForward.z * state.panelDistanceMeters};
+    }
+}
+
+void androidXrResetUiPanelPose() {
+    if (!bootstrap.panelHandAttached)
+        bootstrap.panelPoseInitialized = false;
 }
 
 bool androidXrAttachUiPanelToHand(const AndroidXrHandState& hand, unsigned handIndex) {
@@ -1410,6 +1431,7 @@ void androidXrBootstrapDestroySession() {
     bootstrap.panelPoseInitialized = false;
     bootstrap.panelHandAttached = false;
     bootstrap.panelWidthMeters = 1.2f;
+    bootstrap.panelDistanceMeters = 1.4f;
     bootstrap.recenterTime = 0;
     bootstrap.d3dDevice = nullptr;
     bootstrap.depthFormat = D3DFMT_UNKNOWN;
