@@ -1,8 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
-    <uses-feature android:name="oculus.software.handtracking" android:required="false" />
-
     <application>
         <meta-data android:name="com.oculus.supportedDevices" android:value="quest3" />
         <activity-alias
