@@ -1015,7 +1015,7 @@ bool androidXrPrepareUiPanel(unsigned width, unsigned height) {
 bool androidXrBeginUiPanel(cInterfaceRenderDevice* renderer, unsigned width, unsigned height) {
     auto* d3d = dynamic_cast<cD3DRender*>(renderer);
     if (!d3d || !androidXrPrepareUiPanel(width, height)) return false;
-    d3d->SetFrameRenderTarget(bootstrap.panelTarget.surface, bootstrap.panelTarget.depth);
+    d3d->SetFrameRenderTarget(bootstrap.panelTarget.surface, bootstrap.panelTarget.depth, true);
     D3DVIEWPORT9 viewport{0, 0, width, height, 0.0f, 1.0f};
     if (FAILED(d3d->lpD3DDevice->SetViewport(&viewport))) {
         d3d->SetFrameRenderTarget(nullptr, nullptr);
