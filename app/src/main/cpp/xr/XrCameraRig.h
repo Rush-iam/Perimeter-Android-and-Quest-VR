@@ -11,6 +11,14 @@
 // instance must be used for eyes and controller rays during a frame.
 class XrCameraRig {
 public:
+    void SetMenuHeadingAligned(bool enabled) {
+        if (menuHeadingAligned_ == enabled) return;
+        menuHeadingAligned_ = enabled;
+        anchored_ = false;
+        menuHeadingAnchored_ = false;
+        if (enabled) menuHeadingRotation_ = Mat3f::ID;
+    }
+
     void BeginFrame(const AndroidXrEyeView views[2], bool recentered) {
         const auto& left = views[0].orientation;
         const auto& right = views[1].orientation;
@@ -23,7 +31,21 @@ public:
         headOrientation_[1] = headQuat.y();
         headOrientation_[2] = headQuat.z();
         headOrientation_[3] = headQuat.s();
-        if (recentered) anchored_ = false;
+        if (recentered) {
+            anchored_ = false;
+            menuHeadingAnchored_ = false;
+        }
+        if (menuHeadingAligned_ && !menuHeadingAnchored_) {
+            // Match the authored menu camera to the headset's current heading.
+            // Tracking-space yaw can differ after a Quest recenter or relaunch.
+            const Vect3f forward = ToEngineRotation(headOrientation_) *
+                Vect3f(0.0f, 0.0f, 1.0f);
+            if (forward.x * forward.x + forward.z * forward.z > 0.01f) {
+                const float yaw = std::atan2(forward.x, forward.z);
+                menuHeadingRotation_ = Mat3f(-yaw, Y_AXIS);
+                menuHeadingAnchored_ = true;
+            }
+        }
         if (anchored_) return;
         for (int axis = 0; axis < 3; ++axis)
             anchor_[axis] = (views[0].position[axis] + views[1].position[axis]) * 0.5f;
@@ -32,16 +54,13 @@ public:
 
     MatXf Pose(const float position[3], const float orientation[4]) const {
         // Reflect OpenXR's -Z-forward frame into the engine's +Z-forward frame.
-        const Mat3f trackingRotation(QuatF(orientation[3], orientation[0],
-                                            orientation[1], orientation[2]));
-        Mat3f engineRotation = trackingRotation;
-        for (int row = 0; row < 3; ++row)
-            for (int column = 0; column < 3; ++column)
-                engineRotation[row][column] *=
-                    (row == 2 ? -1.0f : 1.0f) * (column == 2 ? -1.0f : 1.0f);
+        const Mat3f engineRotation = ToEngineRotation(orientation);
         const Vect3f relative(position[0] - anchor_[0], position[1] - anchor_[1],
                               -(position[2] - anchor_[2]));
-        return MatXf(engineRotation, offset_ + relative * unitsPerMeter_);
+        const Mat3f heading = menuHeadingAligned_
+            ? menuHeadingRotation_ : Mat3f::ID;
+        return MatXf(heading * engineRotation,
+                      offset_ + heading * relative * unitsPerMeter_);
     }
 
     // Apply independently adjustable scale-depth compensation in the supplied
@@ -202,10 +221,24 @@ public:
     }
 
 private:
+    static Mat3f ToEngineRotation(const float orientation[4]) {
+        const Mat3f trackingRotation(QuatF(orientation[3], orientation[0],
+                                            orientation[1], orientation[2]));
+        Mat3f engineRotation = trackingRotation;
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 3; ++column)
+                engineRotation[row][column] *=
+                    (row == 2 ? -1.0f : 1.0f) * (column == 2 ? -1.0f : 1.0f);
+        return engineRotation;
+    }
+
     static constexpr float defaultUnitsPerMeter_ = 100.0f;
     static constexpr float panSpeedGameUnitsPerSecond_ = 540.0f;
     static constexpr float scaleMovementMultiplier_ = 0.5f;
     bool anchored_ = false;
+    bool menuHeadingAligned_ = false;
+    bool menuHeadingAnchored_ = false;
+    Mat3f menuHeadingRotation_ = Mat3f::ID;
     float anchor_[3]{};
     float headOrientation_[4]{0.0f, 0.0f, 0.0f, 1.0f};
     Vect3f panForward_ = Vect3f::ZERO;
