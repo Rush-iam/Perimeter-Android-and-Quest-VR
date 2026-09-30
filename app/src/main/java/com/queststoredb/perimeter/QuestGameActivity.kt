@@ -8,6 +8,7 @@ class QuestGameActivity : MainActivity() {
     private var activityResumed = false
 
     private external fun nativeSetAudioPaused(paused: Boolean)
+    private external fun nativeSetXrPaused(paused: Boolean)
 
     private fun setAudioPaused(paused: Boolean) {
         if (!mBrokenLibraries && mSDLThread != null) {
@@ -19,9 +20,11 @@ class QuestGameActivity : MainActivity() {
         activityResumed = false
         setAudioPaused(true)
         super.onPause()
+        if (!mBrokenLibraries && mSDLThread != null) nativeSetXrPaused(true)
     }
 
     override fun onResume() {
+        if (!mBrokenLibraries && mSDLThread != null) nativeSetXrPaused(false)
         super.onResume()
         activityResumed = true
         if (hasWindowFocus()) {

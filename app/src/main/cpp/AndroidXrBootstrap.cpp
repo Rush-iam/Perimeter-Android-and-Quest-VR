@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -100,6 +101,12 @@ struct Bootstrap {
 Bootstrap bootstrap;
 std::atomic<bool> standbyStop{false};
 std::thread standbyThread;
+std::atomic<bool> lifecyclePaused{false};
+// Serialize the game thread's frame calls with the pause event pump.
+std::mutex lifecycleMutex;
+std::mutex pausedThreadMutex;
+std::atomic<bool> gameThreadOwnsEvents{false};
+std::thread pausedEventThread;
 void logResult(const char* operation, XrResult result);
 
 void recordReferenceSpaceChange(const XrEventDataBuffer& event) {
@@ -360,6 +367,50 @@ void runStandbyFrames() {
         end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         { QueueLock lock(state.interop); result = xrEndFrame(state.session, &end); }
         if (result != XR_SUCCESS) break;
+    }
+}
+
+// SDL suspends its game thread on Activity pause. Keep processing the runtime's
+// STOPPING event so tracking is released instead of leaving a running session
+// behind while Android has withdrawn focus and tracker access.
+void runPausedEvents() {
+    while (lifecyclePaused.load()) {
+        {
+            std::lock_guard<std::mutex> lock(lifecycleMutex);
+            if (!bootstrap.session || !bootstrap.running) break;
+            if (!bootstrap.frameBegun) {
+                XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
+                XrResult pollResult;
+                while ((pollResult = xrPollEvent(bootstrap.instance, &event)) == XR_SUCCESS) {
+                    if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
+                        const auto& change = *reinterpret_cast<const XrEventDataSessionStateChanged*>(&event);
+                        if (change.session == bootstrap.session) {
+                            bootstrap.focused = change.state == XR_SESSION_STATE_FOCUSED;
+                            if (!bootstrap.focused) resetInputEdges();
+                            if (change.state == XR_SESSION_STATE_STOPPING) {
+                                const XrResult endResult = xrEndSession(bootstrap.session);
+                                logResult("xrEndSession(paused)", endResult);
+                                bootstrap.running = false;
+                                break;
+                            }
+                        }
+                    } else if (event.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+                        recordReferenceSpaceChange(event);
+                    } else if (event.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
+                        bootstrap.running = false;
+                        bootstrap.focused = false;
+                        resetInputEdges();
+                        break;
+                    }
+                    event = {XR_TYPE_EVENT_DATA_BUFFER};
+                }
+                if (pollResult != XR_EVENT_UNAVAILABLE && pollResult != XR_SUCCESS) {
+                    logResult("xrPollEvent(paused)", pollResult);
+                    break;
+                }
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
 
@@ -694,6 +745,8 @@ bool ensurePanelTarget(uint32_t width, uint32_t height) {
 
 } // namespace
 
+static void endFrameLocked(bool rendered);
+
 bool androidXrBootstrapInitialize(void* dxvkHandle) {
     if (bootstrap.hooksInstalled) return true;
     JNIEnv* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
@@ -835,18 +888,21 @@ bool androidXrBootstrapCreateSession(IDirect3DDevice9* device) {
         androidXrBootstrapDestroySession();
         return false;
     }
+    gameThreadOwnsEvents.store(false);
     standbyStop.store(false);
     standbyThread = std::thread(runStandbyFrames);
     return true;
 }
 
 bool androidXrBeginFrame(AndroidXrEyeView output[2], AndroidXrInputFrame* input) {
+    std::lock_guard<std::mutex> lock(lifecycleMutex);
     auto& state = bootstrap;
     if (input) *input = {};
     state.viewsValid = false;
-    if (!state.session || !output) return false;
+    if (lifecyclePaused.load() || !state.session || !output) return false;
     standbyStop.store(true);
     if (standbyThread.joinable()) standbyThread.join();
+    gameThreadOwnsEvents.store(true);
     XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
     XrResult result;
     while ((result = xrPollEvent(state.instance, &event)) == XR_SUCCESS) {
@@ -899,7 +955,7 @@ bool androidXrBeginFrame(AndroidXrEyeView output[2], AndroidXrInputFrame* input)
         (XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT);
     if (!state.viewsValid) {
         resetInputEdges();
-        androidXrEndFrame(false);
+        endFrameLocked(false);
         return false;
     }
     if (input) snapshotInput(input);
@@ -921,10 +977,12 @@ bool androidXrBeginFrame(AndroidXrEyeView output[2], AndroidXrInputFrame* input)
 }
 
 bool androidXrIsFocused() {
+    std::lock_guard<std::mutex> lock(lifecycleMutex);
     return bootstrap.focused && bootstrap.viewsValid;
 }
 
 bool androidXrSessionActive() {
+    std::lock_guard<std::mutex> lock(lifecycleMutex);
     return bootstrap.session != XR_NULL_HANDLE;
 }
 
@@ -1067,7 +1125,7 @@ void androidXrSetUiPanelVisible(bool visible) {
     bootstrap.panelVisible = visible;
 }
 
-void androidXrEndFrame(bool rendered) {
+static void endFrameLocked(bool rendered) {
     auto& state = bootstrap;
     if (!state.frameBegun) return;
     bool copied = false;
@@ -1315,11 +1373,21 @@ void androidXrEndFrame(bool rendered) {
     state.frameBegun = false;
 }
 
+void androidXrEndFrame(bool rendered) {
+    std::lock_guard<std::mutex> lock(lifecycleMutex);
+    endFrameLocked(rendered);
+}
+
 void androidXrBootstrapDestroySession() {
+    std::lock_guard<std::mutex> threadLock(pausedThreadMutex);
+    lifecyclePaused.store(false);
+    if (pausedEventThread.joinable()) pausedEventThread.join();
+    std::lock_guard<std::mutex> lock(lifecycleMutex);
+    gameThreadOwnsEvents.store(false);
     androidXrClearListenerView();
     standbyStop.store(true);
     if (standbyThread.joinable()) standbyThread.join();
-    if (bootstrap.frameBegun) androidXrEndFrame(false);
+    if (bootstrap.frameBegun) endFrameLocked(false);
     bootstrap.focused = false;
     resetInputEdges();
     if (bootstrap.graphicsQueue && bootstrap.interop) {
@@ -1365,6 +1433,23 @@ void androidXrBootstrapDestroySession() {
     bootstrap.interop = nullptr;
     bootstrap.graphicsQueue = VK_NULL_HANDLE;
     bootstrap.running = false;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_queststoredb_perimeter_QuestGameActivity_nativeSetXrPaused(
+    JNIEnv*, jobject, jboolean paused) {
+    std::lock_guard<std::mutex> threadLock(pausedThreadMutex);
+    if (paused) {
+        lifecyclePaused.store(true);
+        std::lock_guard<std::mutex> lock(lifecycleMutex);
+        // The startup standby thread already owns event polling until the
+        // first rendered frame takes ownership on the game thread.
+        if (gameThreadOwnsEvents.load() && !pausedEventThread.joinable())
+            pausedEventThread = std::thread(runPausedEvents);
+    } else {
+        lifecyclePaused.store(false);
+        if (pausedEventThread.joinable()) pausedEventThread.join();
+    }
 }
 
 void androidXrBootstrapDestroy() {
