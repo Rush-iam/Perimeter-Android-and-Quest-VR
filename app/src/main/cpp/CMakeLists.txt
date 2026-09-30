@@ -261,7 +261,7 @@ target_sources(perimeter PRIVATE
 target_link_libraries(perimeter PRIVATE AndroidDxvk::Headers)
 if(PERIMETER_ANDROID_XR)
     target_sources(UserInterface PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/xr/XrBuildingRay.cpp")
+        "${CMAKE_CURRENT_SOURCE_DIR}/xr/XrUnitRay.cpp")
     target_include_directories(UserInterface PRIVATE
         "${PERIMETER_ROOT}/Source/Render/src")
     target_sources(perimeter PRIVATE

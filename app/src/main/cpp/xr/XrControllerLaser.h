@@ -11,8 +11,10 @@
 inline bool xrBuildControllerLaserMesh(Vect3f start, Vect3f finish,
                                        float cameraNearMeters,
                                        Vect3f (&corners)[4]) {
-    // Clip before projection, including when the controller is behind the eye.
-    const float nearZ = -0.01f;
+    // Clip the beam to the same near plane as the eye camera. Moving vertices
+    // to that plane after projection changes their depth without changing
+    // their screen position, causing false occlusion as tabletop scale changes.
+    const float nearZ = -std::max(0.01f, cameraNearMeters + 0.001f);
     if (start.z >= nearZ && finish.z >= nearZ) return false;
     if (start.z > nearZ)
         start += (finish - start) * ((nearZ - start.z) / (finish.z - start.z));
@@ -36,12 +38,7 @@ inline bool xrBuildControllerLaserMesh(Vect3f start, Vect3f finish,
                             projectedFinish + side, projectedFinish - side};
     for (unsigned i = 0; i < 4; ++i) {
         const float depth = i < 2 ? -start.z : -finish.z;
-        // The world camera's near plane is in game units and moves in meters
-        // as the tabletop scale changes. Keep the projected laser position,
-        // but place any nearer portion just inside the visible depth range.
-        const float renderDepth = std::max(depth, cameraNearMeters + 0.001f);
-        corners[i] = Vect3f(points[i].x * renderDepth,
-                            points[i].y * renderDepth, renderDepth);
+        corners[i] = Vect3f(points[i].x * depth, points[i].y * depth, depth);
     }
     return true;
 }
