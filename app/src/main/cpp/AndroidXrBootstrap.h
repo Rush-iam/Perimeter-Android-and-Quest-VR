@@ -58,6 +58,7 @@ bool androidXrBeginUiPanel(cInterfaceRenderDevice* renderer, unsigned width, uns
 void androidXrRestoreUiPanelViewport(cInterfaceRenderDevice* renderer,
                                      unsigned width, unsigned height);
 void androidXrEndUiPanel(cInterfaceRenderDevice* renderer);
+bool androidXrDrawUiPanelInEye(cInterfaceRenderDevice* renderer, unsigned eye);
 bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigned height,
                          float* pixelX, float* pixelY, float* distanceMeters = nullptr);
 void androidXrSetUiPanelFixed();

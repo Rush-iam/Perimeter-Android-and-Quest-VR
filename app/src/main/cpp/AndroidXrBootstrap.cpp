@@ -79,6 +79,7 @@ struct Bootstrap {
     bool panelPoseInitialized = false;
     bool panelHandAttached = false;
     bool panelVisible = true;
+    bool panelUsesEyeImages = false;
     ID3D9VkInteropDevice* interop = nullptr;
     VkQueue graphicsQueue = VK_NULL_HANDLE;
     PFN_xrCreateVulkanInstanceKHR createInstance = nullptr;
@@ -946,6 +947,7 @@ bool androidXrBeginFrame(AndroidXrEyeView output[2], AndroidXrInputFrame* input)
     }
     if (result != XR_SUCCESS) { logResult("xrBeginFrame", result); return false; }
     state.frameBegun = true;
+    state.panelUsesEyeImages = false;
     XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
     locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     locate.displayTime = state.frameState.predictedDisplayTime;
@@ -1041,6 +1043,147 @@ void androidXrEndUiPanel(cInterfaceRenderDevice* renderer) {
             0.0f, 1.0f};
         d3d->lpD3DDevice->SetViewport(&viewport);
     }
+}
+
+bool androidXrDrawUiPanelInEye(cInterfaceRenderDevice* renderer, unsigned eye) {
+    auto& state = bootstrap;
+    auto* d3d = dynamic_cast<cD3DRender*>(renderer);
+    if (!d3d || !state.frameBegun || !state.panelReady || !state.panelVisible ||
+        eye >= 2 || d3d->frameColorTarget != state.eyeTargets[eye].surface)
+        return false;
+
+    const float halfWidth = state.panelWidthMeters * 0.5f;
+    const float halfHeight = halfWidth * static_cast<float>(state.panelTarget.height) /
+                             static_cast<float>(state.panelTarget.width);
+    const auto& view = state.views[eye];
+    const XrQuaternionf inverseView{-view.pose.orientation.x, -view.pose.orientation.y,
+                                     -view.pose.orientation.z, view.pose.orientation.w};
+    const float left = std::tan(view.fov.angleLeft);
+    const float right = std::tan(view.fov.angleRight);
+    const float down = std::tan(view.fov.angleDown);
+    const float up = std::tan(view.fov.angleUp);
+    if (right <= left || up <= down) return false;
+
+    struct Vertex { float x, y, z, rhw, u, v; };
+    Vertex vertices[4]{};
+    const float localX[4] = {-halfWidth, halfWidth, -halfWidth, halfWidth};
+    const float localY[4] = {halfHeight, halfHeight, -halfHeight, -halfHeight};
+    for (unsigned corner = 0; corner < 4; ++corner) {
+        const XrVector3f rotated = rotateByQuaternion(state.panelPose.orientation,
+                                                       {localX[corner], localY[corner], 0});
+        const XrVector3f relative{
+            state.panelPose.position.x + rotated.x - view.pose.position.x,
+            state.panelPose.position.y + rotated.y - view.pose.position.y,
+            state.panelPose.position.z + rotated.z - view.pose.position.z};
+        const XrVector3f inEye = rotateByQuaternion(inverseView, relative);
+        if (inEye.z >= -0.05f) {
+            // The fixed panel can be behind the head. Keep the scene frame and
+            // omit this eye's panel instead of treating that pose as a failure.
+            state.panelUsesEyeImages = true;
+            return true;
+        }
+        const float reciprocalDepth = -1.0f / inEye.z;
+        vertices[corner] = {
+            (inEye.x * reciprocalDepth - left) / (right - left) * state.eyeTargets[eye].width,
+            (up - inEye.y * reciprocalDepth) / (up - down) * state.eyeTargets[eye].height,
+            0.0f, reciprocalDepth,
+            corner & 1 ? 1.0f : 0.0f, corner & 2 ? 1.0f : 0.0f};
+    }
+
+    d3d->FlushActiveDrawBuffer();
+    auto* device = d3d->lpD3DDevice;
+    struct RenderState { D3DRENDERSTATETYPE type; DWORD value, previous; };
+    // The panel texture already contains source-over UI and additive text.
+    // ONE / INVSRCALPHA preserves both when drawn into the eye image.
+    RenderState renderStates[] = {
+        {D3DRS_ZENABLE, D3DZB_FALSE}, {D3DRS_ZWRITEENABLE, FALSE},
+        {D3DRS_CULLMODE, D3DCULL_NONE}, {D3DRS_ALPHATESTENABLE, FALSE},
+        {D3DRS_ALPHABLENDENABLE, TRUE}, {D3DRS_SRCBLEND, D3DBLEND_ONE},
+        {D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA}, {D3DRS_BLENDOP, D3DBLENDOP_ADD},
+        {D3DRS_SEPARATEALPHABLENDENABLE, FALSE}, {D3DRS_LIGHTING, FALSE},
+        {D3DRS_FOGENABLE, FALSE}, {D3DRS_STENCILENABLE, FALSE},
+        {D3DRS_COLORWRITEENABLE, D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN |
+                                  D3DCOLORWRITEENABLE_BLUE | D3DCOLORWRITEENABLE_ALPHA},
+        // DXVK renders through a UNORM view of the sRGB storage image. Blend
+        // the menu in display-encoded values before the eye image is copied.
+        {D3DRS_SRGBWRITEENABLE, FALSE}};
+    for (auto& setting : renderStates)
+        if (FAILED(device->GetRenderState(setting.type, &setting.previous))) return false;
+
+    struct StageState { unsigned stage; D3DTEXTURESTAGESTATETYPE type; DWORD value, previous; };
+    StageState stageStates[] = {
+        {0, D3DTSS_COLOROP, D3DTOP_SELECTARG1},
+        {0, D3DTSS_COLORARG1, D3DTA_TEXTURE},
+        {0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1},
+        {0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE},
+        {0, D3DTSS_TEXCOORDINDEX, 0},
+        {0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE},
+        {1, D3DTSS_COLOROP, D3DTOP_DISABLE}};
+    for (auto& setting : stageStates)
+        if (FAILED(device->GetTextureStageState(setting.stage, setting.type,
+                                                 &setting.previous))) return false;
+
+    struct SamplerState { D3DSAMPLERSTATETYPE type; DWORD value, previous; };
+    SamplerState samplerStates[] = {
+        {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
+        {D3DSAMP_MAGFILTER, D3DTEXF_LINEAR}, {D3DSAMP_MINFILTER, D3DTEXF_LINEAR},
+        {D3DSAMP_MIPFILTER, D3DTEXF_NONE}, {D3DSAMP_SRGBTEXTURE, FALSE}};
+    for (auto& setting : samplerStates)
+        if (FAILED(device->GetSamplerState(0, setting.type, &setting.previous))) return false;
+    IDirect3DVertexShader9* vertexShader = nullptr;
+    IDirect3DPixelShader9* pixelShader = nullptr;
+    if (FAILED(device->GetVertexShader(&vertexShader))) return false;
+    if (FAILED(device->GetPixelShader(&pixelShader))) {
+        if (vertexShader) vertexShader->Release();
+        return false;
+    }
+    D3DVIEWPORT9 previousViewport{};
+    if (FAILED(device->GetViewport(&previousViewport))) {
+        if (vertexShader) vertexShader->Release();
+        if (pixelShader) pixelShader->Release();
+        return false;
+    }
+    IDirect3DBaseTexture9* previousTexture = d3d->GetTextureD3D(0);
+
+    for (const auto& setting : renderStates)
+        d3d->SetRenderState(setting.type, setting.value);
+    for (const auto& setting : stageStates)
+        d3d->SetTextureStageState(setting.stage, setting.type, setting.value);
+    for (const auto& setting : samplerStates)
+        d3d->SetSamplerState(0, setting.type, setting.value);
+
+    HRESULT result = device->SetVertexShader(nullptr);
+    if (SUCCEEDED(result)) result = device->SetPixelShader(nullptr);
+    D3DVIEWPORT9 eyeViewport{0, 0, state.eyeTargets[eye].width,
+                             state.eyeTargets[eye].height, 0.0f, 1.0f};
+    if (SUCCEEDED(result)) result = device->SetViewport(&eyeViewport);
+    if (SUCCEEDED(result)) result = device->SetTexture(0,
+        static_cast<IDirect3DTexture9*>(state.panelTarget.resource));
+    if (SUCCEEDED(result)) result = device->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+    if (SUCCEEDED(result))
+        result = device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, vertices, sizeof(Vertex));
+
+    device->SetTexture(0, previousTexture);
+    device->SetVertexShader(vertexShader);
+    device->SetPixelShader(pixelShader);
+    device->SetViewport(&previousViewport);
+    if (vertexShader) vertexShader->Release();
+    if (pixelShader) pixelShader->Release();
+    for (const auto& setting : samplerStates)
+        d3d->SetSamplerState(0, setting.type, setting.previous);
+    for (const auto& setting : stageStates)
+        d3d->SetTextureStageState(setting.stage, setting.type, setting.previous);
+    for (const auto& setting : renderStates)
+        d3d->SetRenderState(setting.type, setting.previous);
+
+    if (FAILED(result)) {
+        __android_log_print(ANDROID_LOG_ERROR, "PerimeterXr",
+                            "Draw menu panel in eye %u failed: 0x%08x", eye,
+                            static_cast<unsigned>(result));
+        return false;
+    }
+    state.panelUsesEyeImages = true;
+    return true;
 }
 
 bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigned height,
@@ -1253,7 +1396,8 @@ static void endFrameLocked(bool rendered) {
         }
     }
     bool panelCopied = false;
-    if (copied && rendered && state.viewsValid && state.panelReady && state.panelVisible) {
+    if (copied && rendered && state.viewsValid && state.panelReady && state.panelVisible &&
+        !state.panelUsesEyeImages) {
         auto& target = state.panelTarget;
         const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         state.interop->TransitionTextureLayout(target.interopImage, &range,
