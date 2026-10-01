@@ -11,6 +11,17 @@
 // instance must be used for eyes and controller rays during a frame.
 class XrCameraRig {
 public:
+    void ResetNavigation() {
+        anchored_ = false;
+        menuHeadingAligned_ = false;
+        menuHeadingAnchored_ = false;
+        menuHeadingRotation_ = Mat3f::ID;
+        panHeadingValid_ = false;
+        unitsPerMeter_ = defaultUnitsPerMeter_;
+        offset_ = Vect3f::ZERO;
+        scriptedAlignmentActive_ = false;
+    }
+
     void SetMenuHeadingAligned(bool enabled) {
         if (menuHeadingAligned_ == enabled) return;
         menuHeadingAligned_ = enabled;
