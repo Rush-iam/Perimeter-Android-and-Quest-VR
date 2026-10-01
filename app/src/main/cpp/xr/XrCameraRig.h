@@ -17,6 +17,13 @@ public:
         menuHeadingAnchored_ = false;
         menuHeadingRotation_ = Mat3f::ID;
         panHeadingValid_ = false;
+        navigationRotation_ = Mat3f::ID;
+        alternateRightStick_ = false;
+        snapReady_ = false;
+        tiltReady_ = false;
+        tableForwardValid_ = false;
+        terrainLiftActive_ = false;
+        scaleInThisFrame_ = false;
         unitsPerMeter_ = defaultUnitsPerMeter_;
         offset_ = Vect3f::ZERO;
         scriptedAlignmentActive_ = false;
@@ -70,8 +77,8 @@ public:
                               -(position[2] - anchor_[2]));
         const Mat3f heading = menuHeadingAligned_
             ? menuHeadingRotation_ : Mat3f::ID;
-        return MatXf(heading * engineRotation,
-                      offset_ + heading * relative * unitsPerMeter_);
+        return MatXf(navigationRotation_ * heading * engineRotation,
+                      offset_ + navigationRotation_ * heading * relative * unitsPerMeter_);
     }
 
     // Apply independently adjustable scale-depth compensation in the supplied
@@ -93,11 +100,15 @@ public:
         offset_ += desiredHead - Pose(headPosition, identity).trans();
     }
 
-    bool NeedsTablePivot(float scaleStickY, bool rightActive) const {
-        return rightActive && scaleStickY != 0.0f;
+    bool NeedsTablePivot(const float rightStick[2], bool rightActive,
+                         bool missionControls) const {
+        return rightActive && (missionControls ?
+                               std::abs(rightStick[0]) > stickDeadzone_ :
+                               rightStick[1] != 0.0f);
     }
 
     void AlignOffsetToScriptedCamera(float durationSeconds) {
+        terrainLiftActive_ = false;
         if (durationSeconds <= 0.0f) {
             offset_ = Vect3f::ZERO;
             scriptedAlignmentActive_ = false;
@@ -113,6 +124,65 @@ public:
 
     float UnitsPerMeter() const { return unitsPerMeter_; }
 
+    Vect3f HeadWorldPosition(const MatXf& centerWorld,
+                             const float headPosition[3]) const {
+        const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        return centerWorld * Pose(headPosition, identity).trans();
+    }
+
+    void UpdateTerrainClearance(float terrainHeight, const MatXf& centerWorld,
+                                const float headPosition[3], float deltaSeconds,
+                                float maxHeight, bool moved) {
+        if (deltaSeconds <= 0.0f || deltaSeconds > 0.1f) return;
+        const float headHeight = HeadWorldPosition(centerWorld, headPosition).z;
+        float adjustedHeight = headHeight;
+        const float targetHeight = std::min(
+            terrainHeight + minTerrainClearanceGameUnits_, maxHeight);
+        if (scaleInThisFrame_ && adjustedHeight < targetHeight) {
+            // Preserve any clearance that existed before scaling. If already
+            // too low, stop further descent without snapping upward.
+            const float safeHeight = std::min(scaleHeadBeforeHeight_, targetHeight);
+            adjustedHeight = std::max(adjustedHeight, safeHeight);
+        }
+        if (scaleInThisFrame_ && adjustedHeight < terrainHeight) {
+            // A new cliff can be higher than the old position. Exit the mesh
+            // immediately, then ease the remaining distance to full clearance.
+            adjustedHeight = terrainHeight + 1.0f;
+        }
+        // Scaling in also advances the head over terrain; a higher slope can
+        // require an upward recovery even when scale descent was prevented.
+        if ((moved || scaleInThisFrame_) && adjustedHeight < targetHeight)
+            terrainLiftActive_ = true;
+        if (terrainLiftActive_) {
+            const float gap = targetHeight - adjustedHeight;
+            if (gap <= 0.1f) {
+                terrainLiftActive_ = false;
+            } else {
+                // Recover faster after crossing the terrain, but ease both paths.
+                const float response = adjustedHeight < terrainHeight ? 24.0f : 12.0f;
+                adjustedHeight += gap * (1.0f - std::exp(-response * deltaSeconds));
+            }
+        }
+        if (adjustedHeight <= headHeight) return;
+        MatXf worldToRig = centerWorld;
+        worldToRig.invert();
+        offset_ += worldToRig.rot() *
+            Vect3f(0.0f, 0.0f, adjustedHeight - headHeight);
+    }
+
+    void ResetTilt(const MatXf& centerWorld, const float headPosition[3]) {
+        MatXf worldToRig = centerWorld;
+        worldToRig.invert();
+        const float pitch = TablePitch(centerWorld);
+        if (std::abs(pitch) > 0.0001f) {
+            const Vect3f terrainForward = TerrainForward(centerWorld);
+            const Vect3f right(terrainForward.y, -terrainForward.x, 0.0f);
+            RotateAroundHead(Mat3f(worldToRig.rot() * right, pitch),
+                             headPosition);
+        }
+        tiltReady_ = false;
+    }
+
     void RebaseCameraPan(const Vect3f& appliedLocalPan) {
         // The game camera now carries this translation, so remove the same
         // component from the XR offset without changing the rendered view.
@@ -122,10 +192,13 @@ public:
     // Return only this frame's bounded stick pan. Gameplay rebases it into
     // the game camera; the menu can keep it entirely in the rig.
     Vect3f UpdateControls(const float leftStick[2], bool leftActive,
-                        float scaleStickY, bool rightActive,
+                        const float rightStick[2], bool rightActive,
+                        bool missionControls, bool rightClick,
                         float deltaSeconds, const Vect3f& currentWorldPivot,
                         const MatXf& centerWorld, const float headPosition[3],
-                        const Vect3f& skyCenter, float skyRadius) {
+                        const Vect3f& skyCenter, float skyRadius,
+                        float terrainHeight = 0.0f) {
+        scaleInThisFrame_ = false;
         if (scriptedAlignmentActive_) {
             // Input must not overwrite the offset while it is aligning.
             leftActive = rightActive = false;
@@ -137,8 +210,68 @@ public:
             if (t >= 1.0f)
                 scriptedAlignmentActive_ = false;
         }
-        const float scaleInput = rightActive ? scaleStickY : 0.0f;
+        if (missionControls && rightActive && rightClick) {
+            alternateRightStick_ = !alternateRightStick_;
+            snapReady_ = false;
+            tiltReady_ = false;
+        }
+        const float rawScaleInput = rightActive ?
+            (missionControls ? (alternateRightStick_ ? rightStick[0] : 0.0f)
+                             : rightStick[1]) : 0.0f;
+        const float scaleInput = missionControls ?
+            WithStickDeadzone(rawScaleInput) : rawScaleInput;
         if (deltaSeconds <= 0.0f || deltaSeconds > 0.1f) return Vect3f::ZERO;
+        if (missionControls && rightActive) {
+            MatXf worldToRig = centerWorld;
+            worldToRig.invert();
+            const Vect3f up = worldToRig.rot() * Vect3f(0.0f, 0.0f, 1.0f);
+            const Vect3f forward = TerrainForward(centerWorld);
+            const Vect3f right(forward.y, -forward.x, 0.0f);
+            const float x = rightStick[0];
+            const float y = rightStick[1];
+            if (!alternateRightStick_) {
+                if (std::abs(x) < 0.35f) snapReady_ = true;
+                if (snapReady_ && std::abs(x) > 0.7f) {
+                    const float snapAngle = x > 0.0f ? XM_PI / 6.0f : -XM_PI / 6.0f;
+                    RotateAroundHead(Mat3f(up, snapAngle), headPosition);
+                    tableForward_ = Mat3f(snapAngle, Z_AXIS) * forward;
+                    snapReady_ = false;
+                }
+                const float heightInput = WithStickDeadzone(y);
+                if (heightInput != 0.0f) {
+                    const float headHeight =
+                        HeadWorldPosition(centerWorld, headPosition).z;
+                    const float minHeight = terrainHeight + minTerrainClearanceGameUnits_;
+                    const float maxHeight = skyCenter.z + skyRadius * 0.5f;
+                    float heightDelta = heightInput *
+                        heightSpeedGameUnitsPerSecond_ * deltaSeconds;
+                    if (heightDelta > 0.0f)
+                        heightDelta = std::max(0.0f, std::min(heightDelta,
+                                               maxHeight - headHeight));
+                    else
+                        heightDelta = std::min(0.0f, std::max(heightDelta,
+                                               minHeight - headHeight));
+                    offset_ += up * heightDelta;
+                }
+            } else {
+                if (std::abs(y) < 0.35f) tiltReady_ = true;
+                if (tiltReady_ && std::abs(y) > 0.7f) {
+                    const float pitch = TablePitch(centerWorld);
+                    const float target = std::clamp(
+                        pitch - std::copysign(tiltStepRadians_, y),
+                        0.0f, maxTiltRadians_);
+                    const float tiltDelta = pitch - target;
+                    if (std::abs(tiltDelta) > 0.0001f) {
+                        RotateAroundHead(Mat3f(worldToRig.rot() * right, tiltDelta),
+                                         headPosition);
+                    }
+                    tiltReady_ = false;
+                }
+            }
+        } else {
+            snapReady_ = false;
+            tiltReady_ = false;
+        }
         Vect3f cameraPan = Vect3f::ZERO;
         // Project the tracked head's forward axis onto the game Z-up plane,
         // after composing with the game camera. Tracking X/Z is not that plane
@@ -182,14 +315,24 @@ public:
             const Vect3f pivot = worldToRig * currentWorldPivot;
             // Fewer engine units per tracking meter make the tabletop larger.
             float unitsPerMeter = unitsPerMeter_ *
-                std::exp(-scaleInput * 2.1f * deltaSeconds);
-            if (unitsPerMeter < 12.5f) unitsPerMeter = 12.5f;
-            if (unitsPerMeter > 800.0f) unitsPerMeter = 800.0f;
+                std::exp(-scaleInput * (missionControls ? 3.15f : 2.1f) * deltaSeconds);
+            unitsPerMeter = std::clamp(unitsPerMeter,
+                defaultUnitsPerMeter_ / maxScaleFactor_,
+                defaultUnitsPerMeter_ * maxScaleFactor_);
+            if (missionControls && unitsPerMeter < unitsPerMeter_) {
+                scaleInThisFrame_ = true;
+                scaleHeadBeforeHeight_ =
+                    HeadWorldPosition(centerWorld, headPosition).z;
+            }
             // Zoom out moves backward and up; zoom in moves forward and down.
             // World Z is perpendicular to terrain, regardless of camera tilt.
             // Keep both components at the same speed rather than normalizing
             // their combined direction.
-            const Vect3f scaleDirection = panForward_ - Vect3f(0.0f, 0.0f, 1.0f);
+            Vect3f scaleForward = panForward_;
+            if (missionControls) {
+                scaleForward = TerrainForward(centerWorld);
+            }
+            const Vect3f scaleDirection = scaleForward - Vect3f(0.0f, 0.0f, 1.0f);
             SetScaleWithPivotDepth(unitsPerMeter, headPosition, pivot,
                                    worldToRig.rot() * scaleDirection);
         }
@@ -232,6 +375,41 @@ public:
     }
 
 private:
+    static float WithStickDeadzone(float input) {
+        if (std::abs(input) <= stickDeadzone_) return 0.0f;
+        return std::copysign((std::abs(input) - stickDeadzone_) /
+                             (1.0f - stickDeadzone_), input);
+    }
+
+    float TablePitch(const MatXf& centerWorld) const {
+        const Vect3f forward = centerWorld.rot() * navigationRotation_ *
+            Vect3f(0.0f, 0.0f, 1.0f);
+        return std::atan2(-forward.z,
+            std::sqrt(forward.x * forward.x + forward.y * forward.y));
+    }
+
+    Vect3f TerrainForward(const MatXf& centerWorld) {
+        Vect3f forward = centerWorld.rot() * navigationRotation_ *
+            Vect3f(0.0f, 0.0f, 1.0f);
+        forward.z = 0.0f;
+        if (forward.norm2() > 0.0001f) {
+            forward.normalize();
+            tableForward_ = forward;
+            tableForwardValid_ = true;
+        } else if (!tableForwardValid_) {
+            tableForward_ = Vect3f(0.0f, 1.0f, 0.0f);
+            tableForwardValid_ = true;
+        }
+        return tableForward_;
+    }
+
+    void RotateAroundHead(const Mat3f& rotation, const float headPosition[3]) {
+        const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        const Vect3f before = Pose(headPosition, identity).trans();
+        navigationRotation_ = rotation * navigationRotation_;
+        offset_ += before - Pose(headPosition, identity).trans();
+    }
+
     static Mat3f ToEngineRotation(const float orientation[4]) {
         const Mat3f trackingRotation(QuatF(orientation[3], orientation[0],
                                             orientation[1], orientation[2]));
@@ -244,12 +422,27 @@ private:
     }
 
     static constexpr float defaultUnitsPerMeter_ = 100.0f;
+    static constexpr float maxScaleFactor_ = 16.0f;
     static constexpr float panSpeedGameUnitsPerSecond_ = 540.0f;
     static constexpr float scaleMovementMultiplier_ = 0.5f;
+    static constexpr float heightSpeedGameUnitsPerSecond_ = 600.0f;
+    static constexpr float stickDeadzone_ = 0.3f;
+    static constexpr float minTerrainClearanceGameUnits_ = 100.0f;
+    static constexpr float tiltStepRadians_ = 0.17453292f;
+    static constexpr float maxTiltRadians_ = 1.57079633f;
     bool anchored_ = false;
     bool menuHeadingAligned_ = false;
     bool menuHeadingAnchored_ = false;
     Mat3f menuHeadingRotation_ = Mat3f::ID;
+    Mat3f navigationRotation_ = Mat3f::ID;
+    bool alternateRightStick_ = false;
+    bool snapReady_ = false;
+    bool tiltReady_ = false;
+    Vect3f tableForward_ = Vect3f::ZERO;
+    bool tableForwardValid_ = false;
+    bool terrainLiftActive_ = false;
+    bool scaleInThisFrame_ = false;
+    float scaleHeadBeforeHeight_ = 0.0f;
     float anchor_[3]{};
     float headOrientation_[4]{0.0f, 0.0f, 0.0f, 1.0f};
     Vect3f panForward_ = Vect3f::ZERO;
