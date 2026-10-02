@@ -15,10 +15,9 @@ struct AndroidXrEyeView {
 
 enum AndroidXrButton : unsigned {
     ANDROID_XR_SELECT = 1u << 0,
-    ANDROID_XR_COMMAND = 1u << 1,
-    ANDROID_XR_PANEL = 1u << 2,
-    ANDROID_XR_CANCEL = 1u << 3,
-    ANDROID_XR_ROTATE = 1u << 4,
+    ANDROID_XR_PANEL = 1u << 1,
+    ANDROID_XR_CANCEL = 1u << 2,
+    ANDROID_XR_ROTATE = 1u << 3,
 };
 
 struct AndroidXrHandState {

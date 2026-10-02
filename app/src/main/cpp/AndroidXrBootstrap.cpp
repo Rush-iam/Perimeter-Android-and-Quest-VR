@@ -55,7 +55,7 @@ struct Bootstrap {
     XrAction aimAction = XR_NULL_HANDLE;
     XrAction gripAction = XR_NULL_HANDLE;
     XrAction thumbstickAction = XR_NULL_HANDLE;
-    XrAction buttonActions[5]{};
+    XrAction buttonActions[4]{};
     XrPath handPaths[2]{};
     XrSpace aimSpaces[2]{};
     XrSpace gripSpaces[2]{};
@@ -162,11 +162,10 @@ bool createInputActions() {
         !makeAction(state.thumbstickAction, XR_ACTION_TYPE_VECTOR2F_INPUT,
                     "table_control", "Table control") ||
         !makeAction(state.buttonActions[0], XR_ACTION_TYPE_BOOLEAN_INPUT, "select", "Select") ||
-        !makeAction(state.buttonActions[1], XR_ACTION_TYPE_BOOLEAN_INPUT, "command", "Command") ||
-        !makeAction(state.buttonActions[2], XR_ACTION_TYPE_BOOLEAN_INPUT,
+        !makeAction(state.buttonActions[1], XR_ACTION_TYPE_BOOLEAN_INPUT,
                     "panel_toggle", "Panel toggle") ||
-        !makeAction(state.buttonActions[3], XR_ACTION_TYPE_BOOLEAN_INPUT, "cancel", "Cancel") ||
-        !makeAction(state.buttonActions[4], XR_ACTION_TYPE_BOOLEAN_INPUT, "rotate", "Rotate"))
+        !makeAction(state.buttonActions[2], XR_ACTION_TYPE_BOOLEAN_INPUT, "cancel", "Cancel") ||
+        !makeAction(state.buttonActions[3], XR_ACTION_TYPE_BOOLEAN_INPUT, "rotate", "Rotate"))
         return false;
 
     XrPath profile = XR_NULL_PATH;
@@ -182,14 +181,12 @@ bool createInputActions() {
         {state.thumbstickAction, "/user/hand/right/input/thumbstick"},
         {state.buttonActions[0], "/user/hand/left/input/trigger/value"},
         {state.buttonActions[0], "/user/hand/right/input/trigger/value"},
-        {state.buttonActions[1], "/user/hand/left/input/squeeze/value"},
-        {state.buttonActions[1], "/user/hand/right/input/squeeze/value"},
-        {state.buttonActions[2], "/user/hand/left/input/x/click"},
-        {state.buttonActions[2], "/user/hand/right/input/a/click"},
-        {state.buttonActions[3], "/user/hand/left/input/y/click"},
-        {state.buttonActions[3], "/user/hand/right/input/b/click"},
-        {state.buttonActions[4], "/user/hand/left/input/thumbstick/click"},
-        {state.buttonActions[4], "/user/hand/right/input/thumbstick/click"},
+        {state.buttonActions[1], "/user/hand/left/input/x/click"},
+        {state.buttonActions[1], "/user/hand/right/input/a/click"},
+        {state.buttonActions[2], "/user/hand/left/input/y/click"},
+        {state.buttonActions[2], "/user/hand/right/input/b/click"},
+        {state.buttonActions[3], "/user/hand/left/input/thumbstick/click"},
+        {state.buttonActions[3], "/user/hand/right/input/thumbstick/click"},
     };
     std::vector<XrActionSuggestedBinding> bindings;
     bindings.reserve(sizeof(paths) / sizeof(paths[0]));
@@ -305,7 +302,7 @@ void snapshotInput(AndroidXrInputFrame* output) {
             value.thumbstickActive = true;
         }
         unsigned held = 0;
-        for (unsigned button = 0; button < 5; ++button) {
+        for (unsigned button = 0; button < 4; ++button) {
             get.action = state.buttonActions[button];
             XrActionStateBoolean buttonState{XR_TYPE_ACTION_STATE_BOOLEAN};
             if (xrGetActionStateBoolean(state.session, &get, &buttonState) == XR_SUCCESS &&
