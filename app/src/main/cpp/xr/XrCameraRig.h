@@ -190,34 +190,106 @@ public:
         offset_ -= appliedLocalPan;
     }
 
-    void ResetGripDrag() { gripDragHand_ = -1; }
+    void ResetGripDrag() {
+        gripDragHand_ = -1;
+        twoGripActive_ = false;
+    }
 
-    // Move the table with a held controller. Gameplay rebases the terrain-plane
-    // part into the game camera, leaving vertical motion in the XR rig.
-    Vect3f UpdateGripDrag(const AndroidXrHandState hands[2], bool enabled) {
-        int hand = -1;
-        if (enabled) {
-            if (gripDragHand_ >= 0 && hands[gripDragHand_].gripValid &&
-                (hands[gripDragHand_].held & ANDROID_XR_GRIP))
-                hand = gripDragHand_;
-            else
-                for (int candidate = 0; candidate < 2; ++candidate)
-                    if (hands[candidate].gripValid &&
-                        (hands[candidate].held & ANDROID_XR_GRIP)) {
-                        hand = candidate;
-                        break;
-                    }
-        }
-        if (hand < 0) {
-            ResetGripDrag();
-            return Vect3f::ZERO;
-        }
-        const auto& position = hands[hand].gripPosition;
-        if (hand != gripDragHand_) {
-            gripDragHand_ = hand;
+    static bool BothGripsHeld(const AndroidXrHandState hands[2], bool enabled) {
+        return enabled && hands[0].gripValid && hands[1].gripValid &&
+            (hands[0].held & ANDROID_XR_GRIP) &&
+            (hands[1].held & ANDROID_XR_GRIP);
+    }
+
+    // Drag with either one grip or the midpoint of both grips. A two-grip
+    // distance change also scales the table. Gameplay rebases the drag's
+    // terrain-plane part into the game camera.
+    Vect3f UpdateGripDrag(const AndroidXrHandState hands[2], bool enabled,
+                          const Vect3f& worldPivot, const MatXf& centerWorld,
+                          const float headPosition[3]) {
+        const bool bothHeld = BothGripsHeld(hands, enabled);
+        float position[3]{};
+        if (bothHeld) {
+            const bool startingTwoGrip = !twoGripActive_;
+            const Vect3f separation(
+                hands[1].gripPosition[0] - hands[0].gripPosition[0],
+                hands[1].gripPosition[1] - hands[0].gripPosition[1],
+                -(hands[1].gripPosition[2] - hands[0].gripPosition[2]));
+            const float distance = separation.norm();
             for (int axis = 0; axis < 3; ++axis)
-                gripDragPosition_[axis] = position[axis];
-            return Vect3f::ZERO;
+                position[axis] = (hands[0].gripPosition[axis] +
+                                  hands[1].gripPosition[axis]) * 0.5f;
+            if (!twoGripActive_) {
+                twoGripActive_ = true;
+                gripDragHand_ = -1;
+            } else {
+                const Vect3f leftDelta(
+                    hands[0].gripPosition[0] - gripPositions_[0][0],
+                    hands[0].gripPosition[1] - gripPositions_[0][1],
+                    hands[0].gripPosition[2] - gripPositions_[0][2]);
+                const Vect3f rightDelta(
+                    hands[1].gripPosition[0] - gripPositions_[1][0],
+                    hands[1].gripPosition[1] - gripPositions_[1][1],
+                    hands[1].gripPosition[2] - gripPositions_[1][2]);
+                if (leftDelta.norm2() > 0.25f * 0.25f ||
+                    rightDelta.norm2() > 0.25f * 0.25f) {
+                    for (int axis = 0; axis < 3; ++axis)
+                        gripDragPosition_[axis] = position[axis];
+                    // Rebase after a tracking jump so the next valid frame
+                    // does not turn the discontinuity into a scale change.
+                    RememberTwoGrips(hands, distance);
+                    return Vect3f::ZERO;
+                }
+                // Use this frame's distance change so reversing at a scale
+                // limit immediately scales back in the opposite direction.
+                const float distanceRatio =
+                    std::max(gripDistance_, 0.001f) /
+                    std::max(distance, 0.001f);
+                // Slow grip zoom by the square root when zoomed out, and
+                // increase it by the fourth root when zoomed in.
+                const float scaleSpeed = std::pow(
+                    defaultUnitsPerMeter_ / unitsPerMeter_,
+                    unitsPerMeter_ >= defaultUnitsPerMeter_ ? 0.5f : 0.25f);
+                const float unitsPerMeter = ClampUnitsPerMeter(
+                    unitsPerMeter_ * std::pow(distanceRatio,
+                        gripScaleBaseExponent_ * scaleSpeed));
+                if (unitsPerMeter != unitsPerMeter_)
+                    ApplyScale(unitsPerMeter, true, worldPivot, centerWorld,
+                               headPosition);
+            }
+            RememberTwoGrips(hands, distance);
+            if (startingTwoGrip) {
+                for (int axis = 0; axis < 3; ++axis)
+                    gripDragPosition_[axis] = position[axis];
+                return Vect3f::ZERO;
+            }
+        } else {
+            if (twoGripActive_) ResetGripDrag();
+            int hand = -1;
+            if (enabled) {
+                if (gripDragHand_ >= 0 && hands[gripDragHand_].gripValid &&
+                    (hands[gripDragHand_].held & ANDROID_XR_GRIP))
+                    hand = gripDragHand_;
+                else
+                    for (int candidate = 0; candidate < 2; ++candidate)
+                        if (hands[candidate].gripValid &&
+                            (hands[candidate].held & ANDROID_XR_GRIP)) {
+                            hand = candidate;
+                            break;
+                        }
+            }
+            if (hand < 0) {
+                ResetGripDrag();
+                return Vect3f::ZERO;
+            }
+            for (int axis = 0; axis < 3; ++axis)
+                position[axis] = hands[hand].gripPosition[axis];
+            if (hand != gripDragHand_) {
+                gripDragHand_ = hand;
+                for (int axis = 0; axis < 3; ++axis)
+                    gripDragPosition_[axis] = position[axis];
+                return Vect3f::ZERO;
+            }
         }
         const Vect3f trackingDelta(position[0] - gripDragPosition_[0],
                                    position[1] - gripDragPosition_[1],
@@ -229,9 +301,10 @@ public:
             return Vect3f::ZERO;
         const Mat3f heading = menuHeadingAligned_ ?
             menuHeadingRotation_ : Mat3f::ID;
-        // A fixed game distance per physical meter gives 1x XR motion at the
-        // 16x zoom-out limit, 16x at default scale, and 256x at full zoom-in.
-        const float dragUnitsPerMeter = defaultUnitsPerMeter_ * maxScaleFactor_;
+        // Keep drag speed independent of the table's scale limits. Two grips
+        // move the table at half the single-grip speed.
+        const float dragUnitsPerMeter = gripDragUnitsPerMeter_ *
+            (bothHeld ? 0.5f : 1.0f);
         const Vect3f localDrag = navigationRotation_ * heading * trackingDelta *
                                  -dragUnitsPerMeter;
         offset_ += localDrag;
@@ -359,31 +432,12 @@ public:
             }
         }
         if (scaleInput != 0.0f) {
-            MatXf worldToRig = centerWorld;
-            worldToRig.invert();
-            const Vect3f pivot = worldToRig * currentWorldPivot;
             // Fewer engine units per tracking meter make the tabletop larger.
             float unitsPerMeter = unitsPerMeter_ *
                 std::exp(-scaleInput * (missionControls ? 3.15f : 2.1f) * deltaSeconds);
-            unitsPerMeter = std::clamp(unitsPerMeter,
-                defaultUnitsPerMeter_ / maxScaleFactor_,
-                defaultUnitsPerMeter_ * maxScaleFactor_);
-            if (missionControls && unitsPerMeter < unitsPerMeter_) {
-                scaleInThisFrame_ = true;
-                scaleHeadBeforeHeight_ =
-                    HeadWorldPosition(centerWorld, headPosition).z;
-            }
-            // Zoom out moves backward and up; zoom in moves forward and down.
-            // World Z is perpendicular to terrain, regardless of camera tilt.
-            // Keep both components at the same speed rather than normalizing
-            // their combined direction.
-            Vect3f scaleForward = panForward_;
-            if (missionControls) {
-                scaleForward = TerrainForward(centerWorld);
-            }
-            const Vect3f scaleDirection = scaleForward - Vect3f(0.0f, 0.0f, 1.0f);
-            SetScaleWithPivotDepth(unitsPerMeter, headPosition, pivot,
-                                   worldToRig.rot() * scaleDirection);
+            unitsPerMeter = ClampUnitsPerMeter(unitsPerMeter);
+            ApplyScale(unitsPerMeter, missionControls, currentWorldPivot,
+                       centerWorld, headPosition);
         }
         // Scripted positions are authored independently of stick bounds.
         if (skyRadius > 0.0f && (cameraPan.norm2() > 0.0f || scaleInput != 0.0f)) {
@@ -424,6 +478,39 @@ public:
     }
 
 private:
+    static float ClampUnitsPerMeter(float unitsPerMeter) {
+        return std::clamp(unitsPerMeter,
+            defaultUnitsPerMeter_ / maxZoomInFactor_,
+            defaultUnitsPerMeter_ * maxZoomOutFactor_);
+    }
+
+    void RememberTwoGrips(const AndroidXrHandState hands[2], float distance) {
+        gripDistance_ = distance;
+        for (int hand = 0; hand < 2; ++hand)
+            for (int axis = 0; axis < 3; ++axis)
+                gripPositions_[hand][axis] = hands[hand].gripPosition[axis];
+    }
+
+    void ApplyScale(float unitsPerMeter, bool missionControls,
+                    const Vect3f& worldPivot, const MatXf& centerWorld,
+                    const float headPosition[3]) {
+        if (unitsPerMeter == unitsPerMeter_) return;
+        MatXf worldToRig = centerWorld;
+        worldToRig.invert();
+        if (missionControls && unitsPerMeter < unitsPerMeter_) {
+            scaleInThisFrame_ = true;
+            scaleHeadBeforeHeight_ =
+                HeadWorldPosition(centerWorld, headPosition).z;
+        }
+        // Zoom out moves backward and up; zoom in moves forward and down.
+        // World Z stays perpendicular to terrain, including when tilted.
+        const Vect3f scaleForward = missionControls ?
+            TerrainForward(centerWorld) : panForward_;
+        const Vect3f scaleDirection = scaleForward - Vect3f(0.0f, 0.0f, 1.0f);
+        SetScaleWithPivotDepth(unitsPerMeter, headPosition,
+            worldToRig * worldPivot, worldToRig.rot() * scaleDirection);
+    }
+
     static float WithStickDeadzone(float input) {
         if (std::abs(input) <= stickDeadzone_) return 0.0f;
         return std::copysign((std::abs(input) - stickDeadzone_) /
@@ -471,7 +558,10 @@ private:
     }
 
     static constexpr float defaultUnitsPerMeter_ = 100.0f;
-    static constexpr float maxScaleFactor_ = 16.0f;
+    static constexpr float maxZoomOutFactor_ = 20.0f;
+    static constexpr float maxZoomInFactor_ = 20.0f;
+    static constexpr float gripDragUnitsPerMeter_ = 1600.0f;
+    static constexpr float gripScaleBaseExponent_ = 3.0f;
     static constexpr float panSpeedGameUnitsPerSecond_ = 540.0f;
     static constexpr float scaleMovementMultiplier_ = 0.5f;
     static constexpr float heightSpeedGameUnitsPerSecond_ = 600.0f;
@@ -499,6 +589,9 @@ private:
     float unitsPerMeter_ = defaultUnitsPerMeter_;
     int gripDragHand_ = -1;
     float gripDragPosition_[3]{};
+    bool twoGripActive_ = false;
+    float gripPositions_[2][3]{};
+    float gripDistance_ = 0.0f;
     Vect3f offset_ = Vect3f::ZERO;
     Vect3f scriptedAlignmentStart_ = Vect3f::ZERO;
     float scriptedAlignmentElapsed_ = 0.0f;
