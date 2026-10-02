@@ -30,6 +30,7 @@ namespace {
 
 // Keep exported DXVK storage and OpenXR swapchains identical for direct copies.
 constexpr VkFormat xrColorFormat = VK_FORMAT_R8G8B8A8_SRGB;
+constexpr unsigned xrButtonActionCount = 5;
 
 using SetHooksFn = bool (*)(const DxvkAndroidXrHooks*);
 using ResetHooksFn = void (*)();
@@ -55,7 +56,7 @@ struct Bootstrap {
     XrAction aimAction = XR_NULL_HANDLE;
     XrAction gripAction = XR_NULL_HANDLE;
     XrAction thumbstickAction = XR_NULL_HANDLE;
-    XrAction buttonActions[4]{};
+    XrAction buttonActions[xrButtonActionCount]{};
     XrPath handPaths[2]{};
     XrSpace aimSpaces[2]{};
     XrSpace gripSpaces[2]{};
@@ -165,7 +166,8 @@ bool createInputActions() {
         !makeAction(state.buttonActions[1], XR_ACTION_TYPE_BOOLEAN_INPUT,
                     "panel_toggle", "Panel toggle") ||
         !makeAction(state.buttonActions[2], XR_ACTION_TYPE_BOOLEAN_INPUT, "cancel", "Cancel") ||
-        !makeAction(state.buttonActions[3], XR_ACTION_TYPE_BOOLEAN_INPUT, "rotate", "Rotate"))
+        !makeAction(state.buttonActions[3], XR_ACTION_TYPE_BOOLEAN_INPUT, "rotate", "Rotate") ||
+        !makeAction(state.buttonActions[4], XR_ACTION_TYPE_BOOLEAN_INPUT, "drag", "Drag table"))
         return false;
 
     XrPath profile = XR_NULL_PATH;
@@ -187,6 +189,8 @@ bool createInputActions() {
         {state.buttonActions[2], "/user/hand/right/input/b/click"},
         {state.buttonActions[3], "/user/hand/left/input/thumbstick/click"},
         {state.buttonActions[3], "/user/hand/right/input/thumbstick/click"},
+        {state.buttonActions[4], "/user/hand/left/input/squeeze/value"},
+        {state.buttonActions[4], "/user/hand/right/input/squeeze/value"},
     };
     std::vector<XrActionSuggestedBinding> bindings;
     bindings.reserve(sizeof(paths) / sizeof(paths[0]));
@@ -302,7 +306,7 @@ void snapshotInput(AndroidXrInputFrame* output) {
             value.thumbstickActive = true;
         }
         unsigned held = 0;
-        for (unsigned button = 0; button < 4; ++button) {
+        for (unsigned button = 0; button < xrButtonActionCount; ++button) {
             get.action = state.buttonActions[button];
             XrActionStateBoolean buttonState{XR_TYPE_ACTION_STATE_BOOLEAN};
             if (xrGetActionStateBoolean(state.session, &get, &buttonState) == XR_SUCCESS &&
@@ -313,6 +317,7 @@ void snapshotInput(AndroidXrInputFrame* output) {
             value.pressed = held & ~state.previousHeld[hand];
             value.released = state.previousHeld[hand] & ~held;
         }
+        value.held = held;
         state.previousHeld[hand] = held;
         state.previousActive[hand] = true;
     }

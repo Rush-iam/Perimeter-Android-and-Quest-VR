@@ -18,6 +18,7 @@ enum AndroidXrButton : unsigned {
     ANDROID_XR_PANEL = 1u << 1,
     ANDROID_XR_CANCEL = 1u << 2,
     ANDROID_XR_ROTATE = 1u << 3,
+    ANDROID_XR_GRIP = 1u << 4,
 };
 
 struct AndroidXrHandState {
@@ -28,6 +29,7 @@ struct AndroidXrHandState {
     float thumbstick[2]{};
     unsigned pressed = 0;
     unsigned released = 0;
+    unsigned held = 0;
     bool aimValid = false;
     bool gripValid = false;
     bool thumbstickActive = false;

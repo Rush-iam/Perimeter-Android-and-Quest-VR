@@ -24,6 +24,7 @@ public:
         tableForwardValid_ = false;
         terrainLiftActive_ = false;
         scaleInThisFrame_ = false;
+        ResetGripDrag();
         unitsPerMeter_ = defaultUnitsPerMeter_;
         offset_ = Vect3f::ZERO;
         scriptedAlignmentActive_ = false;
@@ -187,6 +188,54 @@ public:
         // The game camera now carries this translation, so remove the same
         // component from the XR offset without changing the rendered view.
         offset_ -= appliedLocalPan;
+    }
+
+    void ResetGripDrag() { gripDragHand_ = -1; }
+
+    // Move the table with a held controller. Gameplay rebases the terrain-plane
+    // part into the game camera, leaving vertical motion in the XR rig.
+    Vect3f UpdateGripDrag(const AndroidXrHandState hands[2], bool enabled) {
+        int hand = -1;
+        if (enabled) {
+            if (gripDragHand_ >= 0 && hands[gripDragHand_].gripValid &&
+                (hands[gripDragHand_].held & ANDROID_XR_GRIP))
+                hand = gripDragHand_;
+            else
+                for (int candidate = 0; candidate < 2; ++candidate)
+                    if (hands[candidate].gripValid &&
+                        (hands[candidate].held & ANDROID_XR_GRIP)) {
+                        hand = candidate;
+                        break;
+                    }
+        }
+        if (hand < 0) {
+            ResetGripDrag();
+            return Vect3f::ZERO;
+        }
+        const auto& position = hands[hand].gripPosition;
+        if (hand != gripDragHand_) {
+            gripDragHand_ = hand;
+            for (int axis = 0; axis < 3; ++axis)
+                gripDragPosition_[axis] = position[axis];
+            return Vect3f::ZERO;
+        }
+        const Vect3f trackingDelta(position[0] - gripDragPosition_[0],
+                                   position[1] - gripDragPosition_[1],
+                                   -(position[2] - gripDragPosition_[2]));
+        for (int axis = 0; axis < 3; ++axis)
+            gripDragPosition_[axis] = position[axis];
+        // Ignore a tracking jump instead of moving the camera across the map.
+        if (trackingDelta.norm2() > 0.25f * 0.25f)
+            return Vect3f::ZERO;
+        const Mat3f heading = menuHeadingAligned_ ?
+            menuHeadingRotation_ : Mat3f::ID;
+        // A fixed game distance per physical meter gives 1x XR motion at the
+        // 16x zoom-out limit, 16x at default scale, and 256x at full zoom-in.
+        const float dragUnitsPerMeter = defaultUnitsPerMeter_ * maxScaleFactor_;
+        const Vect3f localDrag = navigationRotation_ * heading * trackingDelta *
+                                 -dragUnitsPerMeter;
+        offset_ += localDrag;
+        return localDrag;
     }
 
     // Return only this frame's bounded stick pan. Gameplay rebases it into
@@ -448,6 +497,8 @@ private:
     Vect3f panForward_ = Vect3f::ZERO;
     bool panHeadingValid_ = false;
     float unitsPerMeter_ = defaultUnitsPerMeter_;
+    int gripDragHand_ = -1;
+    float gripDragPosition_[3]{};
     Vect3f offset_ = Vect3f::ZERO;
     Vect3f scriptedAlignmentStart_ = Vect3f::ZERO;
     float scriptedAlignmentElapsed_ = 0.0f;
