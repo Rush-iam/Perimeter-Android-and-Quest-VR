@@ -179,6 +179,16 @@ Prioritize according to measurements:
 4. Direct swapchain-image rendering if the extra transfer is material.
 5. Fixed foveation after its attachment/image requirements are supported end to end.
 
+### Model rendering review (2026-10-02)
+
+Source inspection identifies three costs to measure in dense Quest scenes; their relative frame-time impact has not been measured in a headset:
+
+- Each eye calls `DrawView()`, which repeats model visibility checks, mesh preparation, material sorting, and mesh submission. Scene animation and terrain view-family preparation are shared, but model drawing remains per eye. Measure CPU traversal/submission and GPU model time separately during heavy combat. See [`Scene.cpp`](../Perimeter/Source/Render/src/Scene.cpp) and [`GameShell.cpp`](../Perimeter/Source/UserInterface/GameShell.cpp).
+- Shadow and reflection camera setup occurs within each eye's scene pass when those features are enabled. Profile their extra geometry passes before changing them. Share shadow rendering only if one map covers both eyes correctly; reflections may require separate eye views. See [`Scene.cpp`](../Perimeter/Source/Render/src/Scene.cpp) and [`TileMap.cpp`](../Perimeter/Source/Render/tilemap/TileMap.cpp).
+- Controller laser distance calculation visits every live unit model each XR frame. Bounds tests reject most rays, but candidates can require per-triangle tests for both hands. Measure this CPU cost in large battles and consider a spatial candidate query if it is significant. See [`GameShell.cpp`](../Perimeter/Source/UserInterface/GameShell.cpp) and [`XrUnitRay.cpp`](../app/src/main/cpp/xr/XrUnitRay.cpp).
+
+The XR shared LOD reference keeps both eyes on the same available model mesh and adds negligible selection work. Alternate model meshes are loaded from companion `_lod.m3d` resources rather than generated at runtime. See [`XrSceneCamera.h`](../app/src/main/cpp/xr/XrSceneCamera.h) and [`ObjLibrary.cpp`](../Perimeter/Source/Render/src/ObjLibrary.cpp).
+
 Foveating only the destination of a fully rendered image copy will not reduce upstream scene shading. Native Vulkan foveation requires a compatible swapchain/rendering integration; do not assume DXVK's ordinary offscreen targets support it automatically. [Meta fixed foveation](https://developers.meta.com/horizon/documentation/native/android/os-fixed-foveated-rendering/)
 
 Do not budget around Application SpaceWarp initially: it requires additional integration and motion/depth output, not merely submitting the existing color image. [Meta Application SpaceWarp](https://developers.meta.com/horizon/documentation/native/android/mobile-asw/)
