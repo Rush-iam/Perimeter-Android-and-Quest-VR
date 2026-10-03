@@ -1274,7 +1274,7 @@ bool androidXrAttachUiPanelToHand(const AndroidXrHandState& hand, unsigned handI
                                  basePosition.z - hand.aimPosition[2]};
     const float aimHeight = fromPointer.x * aimUp.x + fromPointer.y * aimUp.y +
                             fromPointer.z * aimUp.z;
-    const float heightCorrection = 0.07f - aimHeight;
+    const float heightCorrection = 0.10f - aimHeight;
     // Grip +Z points down with a naturally held Touch controller. Rotate the
     // tablet around the grip's X axis so its front faces the player.
     constexpr float halfTiltRadians = -55.0f * (3.14159265f / 180.0f);
