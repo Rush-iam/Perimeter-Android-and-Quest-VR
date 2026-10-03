@@ -59,6 +59,8 @@ bool androidXrBeginUiPanel(cInterfaceRenderDevice* renderer, unsigned width, uns
 void androidXrRestoreUiPanelViewport(cInterfaceRenderDevice* renderer,
                                      unsigned width, unsigned height);
 void androidXrEndUiPanel(cInterfaceRenderDevice* renderer);
+// Call outside BeginScene/EndScene, after UI drawing and before the pointer cursor.
+void androidXrCaptureUiPanelHitSurface();
 bool androidXrDrawUiPanelInEye(cInterfaceRenderDevice* renderer, unsigned eye);
 bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigned height,
                          float* pixelX, float* pixelY, float* distanceMeters = nullptr);
