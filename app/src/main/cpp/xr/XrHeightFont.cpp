@@ -63,7 +63,8 @@ void xrDrawHeightReadout(cInterfaceRenderDevice* renderer, cFont* font,
     cTexture* texture = font->GetTexture();
     const auto* internal = font->GetInternal();
     const float scale = height / font->GetHeight();
-    const float textureWidth = static_cast<float>(texture->GetWidth());
+    const float textureWidth = static_cast<float>(texture->GetWidth()) /
+        internal->GetRasterScale();
     // An int needs at most digits10 + 1 digits and a minus sign. Lay out once
     // on the stack, then reuse the geometry for every shadow layer.
     struct Glyph { Vect3f uv; float width; float offset; };

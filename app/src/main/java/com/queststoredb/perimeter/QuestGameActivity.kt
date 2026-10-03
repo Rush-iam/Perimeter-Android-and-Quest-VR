@@ -19,7 +19,8 @@ class QuestGameActivity : MainActivity() {
 
     override fun createSDLSurface(context: Context): SDLSurface =
         SDLSurface(context).apply {
-            // SDL's logical window drives UI layout, panel rendering, and pointer mapping.
+            // SDL's logical window drives UI layout and pointer mapping. Native XR
+            // renders the menu panel at 2x density and the gameplay panel at 1x.
             // Keep it independent of the headset's combined display dimensions and the
             // per-eye OpenXR targets, which use the runtime's recommended resolution.
             holder.setFixedSize(800, 600)

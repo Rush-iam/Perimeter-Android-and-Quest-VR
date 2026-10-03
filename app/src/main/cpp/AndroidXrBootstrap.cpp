@@ -1078,16 +1078,20 @@ void androidXrUnbindEye(cInterfaceRenderDevice* renderer) {
     if (auto* d3d = dynamic_cast<cD3DRender*>(renderer)) d3d->SetFrameRenderTarget(nullptr, nullptr);
 }
 
-bool androidXrPrepareUiPanel(unsigned width, unsigned height) {
+bool androidXrPrepareUiPanel(unsigned width, unsigned height, AndroidXrUiPanelKind kind) {
+    const unsigned scale = kind == AndroidXrUiPanelKind::Menu ?
+        AndroidXrMenuUiRenderScale : AndroidXrGameplayUiRenderScale;
     return bootstrap.frameBegun && bootstrap.viewsValid &&
-           ensurePanelTarget(width, height);
+           ensurePanelTarget(width * scale, height * scale);
 }
 
-bool androidXrBeginUiPanel(cInterfaceRenderDevice* renderer, unsigned width, unsigned height) {
+bool androidXrBeginUiPanel(cInterfaceRenderDevice* renderer, unsigned width, unsigned height,
+                         AndroidXrUiPanelKind kind) {
     auto* d3d = dynamic_cast<cD3DRender*>(renderer);
-    if (!d3d || !androidXrPrepareUiPanel(width, height)) return false;
+    if (!d3d || !androidXrPrepareUiPanel(width, height, kind)) return false;
     d3d->SetFrameRenderTarget(bootstrap.panelTarget.surface, bootstrap.panelTarget.depth, true);
-    D3DVIEWPORT9 viewport{0, 0, width, height, 0.0f, 1.0f};
+    D3DVIEWPORT9 viewport{0, 0, bootstrap.panelTarget.width, bootstrap.panelTarget.height,
+                         0.0f, 1.0f};
     if (FAILED(d3d->lpD3DDevice->SetViewport(&viewport))) {
         d3d->SetFrameRenderTarget(nullptr, nullptr);
         return false;
@@ -1121,7 +1125,8 @@ void androidXrRestoreUiPanelViewport(cInterfaceRenderDevice* renderer,
                                      unsigned width, unsigned height) {
     auto* d3d = dynamic_cast<cD3DRender*>(renderer);
     if (!d3d || !d3d->frameColorTarget || !width || !height) return;
-    D3DVIEWPORT9 viewport{0, 0, width, height, 0.0f, 1.0f};
+    D3DVIEWPORT9 viewport{0, 0, bootstrap.panelTarget.width, bootstrap.panelTarget.height,
+                         0.0f, 1.0f};
     d3d->lpD3DDevice->SetViewport(&viewport);
     d3d->SetClipRect(0, 0, static_cast<int>(width), static_cast<int>(height));
 }

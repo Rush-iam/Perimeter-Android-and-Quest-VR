@@ -54,8 +54,18 @@ bool androidXrIsFocused();
 bool androidXrSessionActive();
 bool androidXrBindEye(cInterfaceRenderDevice* renderer, unsigned eye);
 void androidXrUnbindEye(cInterfaceRenderDevice* renderer);
-bool androidXrPrepareUiPanel(unsigned width, unsigned height);
-bool androidXrBeginUiPanel(cInterfaceRenderDevice* renderer, unsigned width, unsigned height);
+enum class AndroidXrUiPanelKind { Gameplay, Menu };
+inline constexpr unsigned AndroidXrMenuUiRenderScale = 2;
+inline constexpr unsigned AndroidXrGameplayUiRenderScale = 1;
+inline constexpr unsigned AndroidXrUiFontRasterScale =
+    AndroidXrMenuUiRenderScale > AndroidXrGameplayUiRenderScale ?
+    AndroidXrMenuUiRenderScale : AndroidXrGameplayUiRenderScale;
+static_assert(AndroidXrMenuUiRenderScale > 0 && AndroidXrGameplayUiRenderScale > 0);
+// Width/height remain logical UI coordinates; Menu renders at twice that density.
+bool androidXrPrepareUiPanel(unsigned width, unsigned height,
+                           AndroidXrUiPanelKind kind = AndroidXrUiPanelKind::Gameplay);
+bool androidXrBeginUiPanel(cInterfaceRenderDevice* renderer, unsigned width, unsigned height,
+                         AndroidXrUiPanelKind kind = AndroidXrUiPanelKind::Gameplay);
 void androidXrRestoreUiPanelViewport(cInterfaceRenderDevice* renderer,
                                      unsigned width, unsigned height);
 void androidXrEndUiPanel(cInterfaceRenderDevice* renderer);
