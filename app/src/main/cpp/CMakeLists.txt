@@ -265,6 +265,7 @@ if(PERIMETER_ANDROID_XR)
     target_include_directories(UserInterface PRIVATE
         "${PERIMETER_ROOT}/Source/Render/src")
     target_sources(perimeter PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/xr/XrHeightFont.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/AndroidXrBootstrap.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/AndroidXrListenerPose.cpp")
     target_link_libraries(perimeter PRIVATE OpenXR::openxr_loader)
@@ -272,6 +273,7 @@ if(PERIMETER_ANDROID_XR)
     target_include_directories(perimeter PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/android-dxvk-v2/patched-source/src/d3d9")
     target_include_directories(perimeter PRIVATE
+        "${PERIMETER_ROOT}/Source/Render/src"
         "${PERIMETER_ROOT}/Source/Render/D3D")
 endif()
 target_link_libraries(perimeter PRIVATE dl)
