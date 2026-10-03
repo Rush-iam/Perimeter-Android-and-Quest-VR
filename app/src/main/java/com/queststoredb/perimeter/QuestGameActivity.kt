@@ -5,20 +5,9 @@ import org.libsdl.app.SDLSurface
 
 /** The engine Activity registered as immersive on Quest. */
 class QuestGameActivity : MainActivity() {
-    private var activityResumed = false
-
-    private external fun nativeSetAudioPaused(paused: Boolean)
     private external fun nativeSetXrPaused(paused: Boolean)
 
-    private fun setAudioPaused(paused: Boolean) {
-        if (!mBrokenLibraries && mSDLThread != null) {
-            nativeSetAudioPaused(paused)
-        }
-    }
-
     override fun onPause() {
-        activityResumed = false
-        setAudioPaused(true)
         super.onPause()
         if (!mBrokenLibraries && mSDLThread != null) nativeSetXrPaused(true)
     }
@@ -26,20 +15,6 @@ class QuestGameActivity : MainActivity() {
     override fun onResume() {
         if (!mBrokenLibraries && mSDLThread != null) nativeSetXrPaused(false)
         super.onResume()
-        activityResumed = true
-        if (hasWindowFocus()) {
-            setAudioPaused(false)
-        }
-    }
-
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        if (!hasFocus) {
-            setAudioPaused(true)
-        }
-        super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && activityResumed) {
-            setAudioPaused(false)
-        }
     }
 
     override fun createSDLSurface(context: Context): SDLSurface =

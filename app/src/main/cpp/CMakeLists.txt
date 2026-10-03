@@ -266,8 +266,7 @@ if(PERIMETER_ANDROID_XR)
         "${PERIMETER_ROOT}/Source/Render/src")
     target_sources(perimeter PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/AndroidXrBootstrap.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/AndroidXrListenerPose.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/AndroidQuestAudio.cpp")
+        "${CMAKE_CURRENT_SOURCE_DIR}/AndroidXrListenerPose.cpp")
     target_link_libraries(perimeter PRIVATE OpenXR::openxr_loader)
     target_link_libraries(perimeter PRIVATE vulkan)
     target_include_directories(perimeter PRIVATE
