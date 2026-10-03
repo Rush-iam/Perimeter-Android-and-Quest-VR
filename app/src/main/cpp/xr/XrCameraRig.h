@@ -117,6 +117,28 @@ public:
 
     float UnitsPerMeter() const { return unitsPerMeter_; }
 
+    float SubtitleDistanceMeters() const {
+        constexpr float normalDistanceMeters = 1.0f;
+        constexpr float zoomedOutDistanceMeters = 0.3f;
+        constexpr float zoomedInDistanceMeters = 3.0f;
+        const float scale = ClampUnitsPerMeter(unitsPerMeter_);
+        const float scaleRatio = scale / defaultUnitsPerMeter_;
+        const float exponent = GripScaleSpeedExponent(scale);
+        // Normalize the integral of grip zoom's scale-dependent speed on each
+        // side of normal zoom, so distance follows the grip motion.
+        const float scaled = std::pow(scaleRatio, exponent);
+        if (scale >= defaultUnitsPerMeter_) {
+            const float zoomOut = (scaled - 1.0f) /
+                (std::pow(maxZoomOutFactor_, exponent) - 1.0f);
+            return normalDistanceMeters +
+                (zoomedOutDistanceMeters - normalDistanceMeters) * zoomOut;
+        }
+        const float zoomIn = (1.0f - scaled) /
+            (1.0f - std::pow(1.0f / maxZoomInFactor_, exponent));
+        return normalDistanceMeters +
+            (zoomedInDistanceMeters - normalDistanceMeters) * zoomIn;
+    }
+
     Vect3f HeadWorldPosition(const MatXf& centerWorld,
                              const float headPosition[3]) const {
         const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -241,7 +263,7 @@ public:
                 // increase it by the fourth root when zoomed in.
                 const float scaleSpeed = std::pow(
                     defaultUnitsPerMeter_ / unitsPerMeter_,
-                    unitsPerMeter_ >= defaultUnitsPerMeter_ ? 0.5f : 0.25f);
+                    GripScaleSpeedExponent(unitsPerMeter_));
                 const float unitsPerMeter = ClampUnitsPerMeter(
                     unitsPerMeter_ * std::pow(distanceRatio,
                         gripScaleBaseExponent_ * scaleSpeed));
@@ -432,6 +454,10 @@ public:
     }
 
 private:
+    static float GripScaleSpeedExponent(float unitsPerMeter) {
+        return unitsPerMeter >= defaultUnitsPerMeter_ ? 0.5f : 0.25f;
+    }
+
     static float ClampUnitsPerMeter(float unitsPerMeter) {
         return std::clamp(unitsPerMeter,
             defaultUnitsPerMeter_ / maxZoomInFactor_,
