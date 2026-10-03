@@ -29,6 +29,12 @@ inline void xrPrepareSceneCameras(cScene* scene, cCamera* center,
         camera->SetAsymmetricPerspective(std::tan(view.fov[0]),
             std::tan(view.fov[1]), std::tan(view.fov[2]), std::tan(view.fov[3]));
     }
+    // A model near the LOD boundary must use the same mesh in both eyes.
+    const Vect3f lodPosition = (eyes[0]->GetPos() + eyes[1]->GetPos()) * 0.5f;
+    const float lodFocus = (eyes[0]->GetFocusViewPort().x +
+                            eyes[1]->GetFocusViewPort().x) * 0.5f;
+    for (cCamera* eye : {eyes[0], eyes[1]})
+        eye->SetStereoLodReference(lodPosition, lodFocus);
 }
 
 #endif
