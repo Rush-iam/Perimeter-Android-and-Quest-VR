@@ -19,6 +19,7 @@ enum AndroidXrButton : unsigned {
     ANDROID_XR_CANCEL = 1u << 2,
     ANDROID_XR_ROTATE = 1u << 3,
     ANDROID_XR_GRIP = 1u << 4,
+    ANDROID_XR_MENU = 1u << 5,
 };
 
 struct AndroidXrHandState {
@@ -55,6 +56,9 @@ bool androidXrSessionActive();
 bool androidXrBindEye(cInterfaceRenderDevice* renderer, unsigned eye);
 void androidXrUnbindEye(cInterfaceRenderDevice* renderer);
 enum class AndroidXrUiPanelKind { Gameplay, Menu };
+// Select the independently retained tablet or front-facing menu surface.
+// Prepare/Begin also select their kind; hit testing both surfaces preserves selection.
+void androidXrSelectUiPanel(AndroidXrUiPanelKind kind);
 inline constexpr unsigned AndroidXrMenuUiRenderScale = 2;
 inline constexpr unsigned AndroidXrGameplayUiRenderScale = 1;
 inline constexpr unsigned AndroidXrUiFontRasterScale =
@@ -74,6 +78,9 @@ void androidXrCaptureUiPanelHitSurface();
 bool androidXrDrawUiPanelInEye(cInterfaceRenderDevice* renderer, unsigned eye);
 bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigned height,
                          float* pixelX, float* pixelY, float* distanceMeters = nullptr);
+bool androidXrHitUiPanels(const AndroidXrHandState& hand, unsigned width, unsigned height,
+                         float* pixelX, float* pixelY, float* distanceMeters = nullptr,
+                         AndroidXrUiPanelKind* kind = nullptr);
 void androidXrSetUiPanelFixed();
 void androidXrSetUiPanelFixed(float distanceMeters, float widthMeters);
 void androidXrResetUiPanelPose();

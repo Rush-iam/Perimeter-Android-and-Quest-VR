@@ -30,7 +30,7 @@ namespace {
 
 // Keep exported DXVK storage and OpenXR swapchains identical for direct copies.
 constexpr VkFormat xrColorFormat = VK_FORMAT_R8G8B8A8_SRGB;
-constexpr unsigned xrButtonActionCount = 5;
+constexpr unsigned xrButtonActionCount = 6;
 
 using SetHooksFn = bool (*)(const DxvkAndroidXrHooks*);
 using ResetHooksFn = void (*)();
@@ -64,36 +64,44 @@ struct Bootstrap {
     bool previousActive[2]{};
     bool focused = false;
     XrSwapchain eyeSwapchains[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
-    XrSwapchain panelSwapchain = XR_NULL_HANDLE;
-    std::vector<XrSwapchainImageVulkan2KHR> swapchainImages[2];
-    std::vector<XrSwapchainImageVulkan2KHR> panelSwapchainImages;
-    EyeTarget eyeTargets[2];
-    EyeTarget panelTarget;
-    IDirect3DSurface9* panelHitSurface = nullptr;
-    IDirect3DSurface9* panelHitPixel = nullptr;
-    IDirect3DSurface9* panelHitReadback = nullptr;
-    bool panelHitSurfaceValid = false;
-    bool panelHitReadbackWarning = false;
-    struct PanelHitSample {
-        LONG x = 0;
-        LONG y = 0;
-        bool opaque = true;
+    struct UiPanel {
+        XrSwapchain swapchain = XR_NULL_HANDLE;
+        std::vector<XrSwapchainImageVulkan2KHR> swapchainImages;
+        EyeTarget target;
+        IDirect3DSurface9* hitSurface = nullptr;
+        IDirect3DSurface9* hitPixel = nullptr;
+        IDirect3DSurface9* hitReadback = nullptr;
+        bool hitSurfaceValid = false;
+        bool hitReadbackWarning = false;
+        struct PanelHitSample {
+            LONG x = 0;
+            LONG y = 0;
+            bool opaque = true;
+        };
+        // Input routing and laser rendering both query the two controller hits.
+        PanelHitSample hitSamples[2]{};
+        unsigned hitSampleCount = 0;
+        XrPosef pose{{0, 0, 0, 1}, {0, 0, -1.4f}};
+        float widthMeters = 1.2f;
+        float distanceMeters = 1.4f;
+        XrVector3f anchor{};
+        XrVector3f forward{0.0f, 0.0f, -1.0f};
+        bool ready = false;
+        bool poseInitialized = false;
+        bool handAttached = false;
+        bool visible = true;
+        bool renderedInEyes = false;
     };
-    // Input routing and laser rendering both query the two controller hits.
-    PanelHitSample panelHitSamples[2]{};
-    unsigned panelHitSampleCount = 0;
+    std::vector<XrSwapchainImageVulkan2KHR> swapchainImages[2];
+    EyeTarget eyeTargets[2];
     IDirect3DDevice9* d3dDevice = nullptr;
     D3DFORMAT depthFormat = D3DFMT_UNKNOWN;
-    XrPosef panelPose{{0, 0, 0, 1}, {0, 0, -1.4f}};
-    float panelWidthMeters = 1.2f;
-    float panelDistanceMeters = 1.4f;
-    XrVector3f panelAnchor{};
-    XrVector3f panelForward{0.0f, 0.0f, -1.0f};
-    bool panelReady = false;
-    bool panelPoseInitialized = false;
-    bool panelHandAttached = false;
-    bool panelVisible = true;
-    bool panelUsesEyeImages = false;
+    UiPanel uiPanels[2];
+    AndroidXrUiPanelKind activeUiPanel = AndroidXrUiPanelKind::Gameplay;
+    UiPanel& uiPanel(AndroidXrUiPanelKind kind) {
+        return uiPanels[kind == AndroidXrUiPanelKind::Menu ? 1 : 0];
+    }
+    UiPanel& uiPanel() { return uiPanel(activeUiPanel); }
     ID3D9VkInteropDevice* interop = nullptr;
     VkQueue graphicsQueue = VK_NULL_HANDLE;
     PFN_xrCreateVulkanInstanceKHR createInstance = nullptr;
@@ -180,7 +188,8 @@ bool createInputActions() {
                     "panel_toggle", "Panel toggle") ||
         !makeAction(state.buttonActions[2], XR_ACTION_TYPE_BOOLEAN_INPUT, "cancel", "Cancel") ||
         !makeAction(state.buttonActions[3], XR_ACTION_TYPE_BOOLEAN_INPUT, "rotate", "Rotate") ||
-        !makeAction(state.buttonActions[4], XR_ACTION_TYPE_BOOLEAN_INPUT, "drag", "Drag table"))
+        !makeAction(state.buttonActions[4], XR_ACTION_TYPE_BOOLEAN_INPUT, "drag", "Drag table") ||
+        !makeAction(state.buttonActions[5], XR_ACTION_TYPE_BOOLEAN_INPUT, "menu", "Menu"))
         return false;
 
     XrPath profile = XR_NULL_PATH;
@@ -204,6 +213,7 @@ bool createInputActions() {
         {state.buttonActions[3], "/user/hand/right/input/thumbstick/click"},
         {state.buttonActions[4], "/user/hand/left/input/squeeze/value"},
         {state.buttonActions[4], "/user/hand/right/input/squeeze/value"},
+        {state.buttonActions[5], "/user/hand/left/input/menu/click"},
     };
     std::vector<XrActionSuggestedBinding> bindings;
     bindings.reserve(sizeof(paths) / sizeof(paths[0]));
@@ -632,24 +642,23 @@ bool createEyes(IDirect3DDevice9* device) {
     return true;
 }
 
-void destroyPanelTarget() {
-    auto& state = bootstrap;
-    state.panelReady = false;
-    state.panelHitSurfaceValid = false;
-    state.panelHitReadbackWarning = false;
-    state.panelHitSampleCount = 0;
-    if (state.panelHitReadback) state.panelHitReadback->Release();
-    if (state.panelHitPixel) state.panelHitPixel->Release();
-    if (state.panelHitSurface) state.panelHitSurface->Release();
-    state.panelHitReadback = nullptr;
-    state.panelHitPixel = nullptr;
-    state.panelHitSurface = nullptr;
-    state.panelSwapchainImages.clear();
-    if (state.panelSwapchain != XR_NULL_HANDLE) {
-        xrDestroySwapchain(state.panelSwapchain);
-        state.panelSwapchain = XR_NULL_HANDLE;
+void destroyPanelTarget(Bootstrap::UiPanel& panel) {
+    panel.ready = false;
+    panel.hitSurfaceValid = false;
+    panel.hitReadbackWarning = false;
+    panel.hitSampleCount = 0;
+    if (panel.hitReadback) panel.hitReadback->Release();
+    if (panel.hitPixel) panel.hitPixel->Release();
+    if (panel.hitSurface) panel.hitSurface->Release();
+    panel.hitReadback = nullptr;
+    panel.hitPixel = nullptr;
+    panel.hitSurface = nullptr;
+    panel.swapchainImages.clear();
+    if (panel.swapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(panel.swapchain);
+        panel.swapchain = XR_NULL_HANDLE;
     }
-    auto& target = state.panelTarget;
+    auto& target = panel.target;
     if (target.interopImage) target.interopImage->Release();
     if (target.depth) target.depth->Release();
     if (target.surface) target.surface->Release();
@@ -659,7 +668,8 @@ void destroyPanelTarget() {
 
 void initializePanelPose() {
     auto& state = bootstrap;
-    if (state.panelHandAttached || state.panelPoseInitialized || !state.viewsValid) return;
+    auto& panel = state.uiPanel();
+    if (panel.handAttached || panel.poseInitialized || !state.viewsValid) return;
     const auto& left = state.views[0].pose;
     const auto& right = state.views[1].pose;
     XrVector3f center{(left.position.x + right.position.x) * 0.5f,
@@ -676,14 +686,14 @@ void initializePanelPose() {
         forward.z = -1.0f;
     }
     const float halfYaw = 0.5f * std::atan2(-forward.x, -forward.z);
-    state.panelPose.orientation = {0.0f, std::sin(halfYaw), 0.0f,
+    panel.pose.orientation = {0.0f, std::sin(halfYaw), 0.0f,
                                    std::cos(halfYaw)};
-    state.panelAnchor = center;
-    state.panelForward = {forward.x, 0.0f, forward.z};
-    state.panelPose.position = {center.x + state.panelForward.x * state.panelDistanceMeters,
+    panel.anchor = center;
+    panel.forward = {forward.x, 0.0f, forward.z};
+    panel.pose.position = {center.x + panel.forward.x * panel.distanceMeters,
                                 center.y,
-                                center.z + state.panelForward.z * state.panelDistanceMeters};
-    state.panelPoseInitialized = true;
+                                center.z + panel.forward.z * panel.distanceMeters};
+    panel.poseInitialized = true;
 }
 
 XrQuaternionf multiplyQuaternions(const XrQuaternionf& a, const XrQuaternionf& b) {
@@ -695,24 +705,25 @@ XrQuaternionf multiplyQuaternions(const XrQuaternionf& a, const XrQuaternionf& b
 
 bool ensurePanelTarget(uint32_t width, uint32_t height) {
     auto& state = bootstrap;
-    if (state.panelReady) {
-        if (state.panelTarget.width == width && state.panelTarget.height == height) {
+    auto& panel = state.uiPanel();
+    if (panel.ready) {
+        if (panel.target.width == width && panel.target.height == height) {
             initializePanelPose();
             return true;
         }
         state.interop->FlushRenderingCommands();
-        if (!state.interop->WaitForResource(state.panelTarget.resource, 0)) return false;
-        destroyPanelTarget();
+        if (!state.interop->WaitForResource(panel.target.resource, 0)) return false;
+        destroyPanelTarget(panel);
     }
     if (!state.d3dDevice || !state.interop || !width || !height ||
         state.depthFormat == D3DFMT_UNKNOWN)
         return false;
 
-    auto& target = state.panelTarget;
+    auto& target = panel.target;
     target.width = width;
     target.height = height;
     const auto cleanupPanelTarget = [&]() {
-        destroyPanelTarget();
+        destroyPanelTarget(panel);
         return false;
     };
     D3D9VkExtImageDesc desc{};
@@ -744,6 +755,12 @@ bool ensurePanelTarget(uint32_t width, uint32_t height) {
         imageInfo.format != xrColorFormat ||
         !(imageInfo.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return cleanupPanelTarget();
 
+    if (state.activeUiPanel == AndroidXrUiPanelKind::Menu) {
+        initializePanelPose();
+        panel.ready = true;
+        return true;
+    }
+
     XrSwapchainCreateInfo swapchainInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
                                XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
@@ -755,66 +772,66 @@ bool ensurePanelTarget(uint32_t width, uint32_t height) {
     swapchainInfo.width = width;
     swapchainInfo.height = height;
     XrResult result = xrCreateSwapchain(state.session, &swapchainInfo,
-                                        &state.panelSwapchain);
+                                        &panel.swapchain);
     logResult("xrCreateSwapchain(panel)", result);
     if (result != XR_SUCCESS) return cleanupPanelTarget();
     uint32_t imageCount = 0;
-    if (xrEnumerateSwapchainImages(state.panelSwapchain, 0, &imageCount, nullptr) != XR_SUCCESS ||
+    if (xrEnumerateSwapchainImages(panel.swapchain, 0, &imageCount, nullptr) != XR_SUCCESS ||
         !imageCount) return cleanupPanelTarget();
-    state.panelSwapchainImages.resize(imageCount);
-    for (auto& image : state.panelSwapchainImages)
+    panel.swapchainImages.resize(imageCount);
+    for (auto& image : panel.swapchainImages)
         image.type = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR;
-    if (xrEnumerateSwapchainImages(state.panelSwapchain, imageCount, &imageCount,
-        reinterpret_cast<XrSwapchainImageBaseHeader*>(state.panelSwapchainImages.data())) != XR_SUCCESS)
+    if (xrEnumerateSwapchainImages(panel.swapchain, imageCount, &imageCount,
+        reinterpret_cast<XrSwapchainImageBaseHeader*>(panel.swapchainImages.data())) != XR_SUCCESS)
         return cleanupPanelTarget();
 
     initializePanelPose();
-    state.panelReady = true;
+    panel.ready = true;
     return true;
 }
 
-bool uiPanelPixelHasAlpha(float u, float v) {
+bool uiPanelPixelHasAlpha(Bootstrap::UiPanel& panel, float u, float v) {
     auto& state = bootstrap;
     // Sample the last displayed UI, before its pointer cursor was drawn.
-    const LONG x = std::clamp(static_cast<LONG>(u * state.panelTarget.width),
-        static_cast<LONG>(0), static_cast<LONG>(state.panelTarget.width) - 1);
-    const LONG y = std::clamp(static_cast<LONG>(v * state.panelTarget.height),
-        static_cast<LONG>(0), static_cast<LONG>(state.panelTarget.height) - 1);
-    for (unsigned i = 0; i < state.panelHitSampleCount; ++i) {
-        const auto& sample = state.panelHitSamples[i];
+    const LONG x = std::clamp(static_cast<LONG>(u * panel.target.width),
+        static_cast<LONG>(0), static_cast<LONG>(panel.target.width) - 1);
+    const LONG y = std::clamp(static_cast<LONG>(v * panel.target.height),
+        static_cast<LONG>(0), static_cast<LONG>(panel.target.height) - 1);
+    for (unsigned i = 0; i < panel.hitSampleCount; ++i) {
+        const auto& sample = panel.hitSamples[i];
         if (sample.x == x && sample.y == y) return sample.opaque;
     }
 
     // Copy only the hit texel to CPU memory, rather than the entire panel.
     auto* device = state.d3dDevice;
     HRESULT result = D3D_OK;
-    if (!state.panelHitPixel)
+    if (!panel.hitPixel)
         result = device->CreateRenderTarget(1, 1, D3DFMT_A8B8G8R8,
-            D3DMULTISAMPLE_NONE, 0, FALSE, &state.panelHitPixel, nullptr);
-    if (SUCCEEDED(result) && !state.panelHitReadback)
+            D3DMULTISAMPLE_NONE, 0, FALSE, &panel.hitPixel, nullptr);
+    if (SUCCEEDED(result) && !panel.hitReadback)
         result = device->CreateOffscreenPlainSurface(1, 1, D3DFMT_A8B8G8R8,
-            D3DPOOL_SYSTEMMEM, &state.panelHitReadback, nullptr);
+            D3DPOOL_SYSTEMMEM, &panel.hitReadback, nullptr);
     const RECT source{x, y, x + 1, y + 1};
     if (SUCCEEDED(result))
-        result = device->StretchRect(state.panelHitSurface, &source,
-            state.panelHitPixel, nullptr, D3DTEXF_NONE);
+        result = device->StretchRect(panel.hitSurface, &source,
+            panel.hitPixel, nullptr, D3DTEXF_NONE);
     if (SUCCEEDED(result))
-        result = device->GetRenderTargetData(state.panelHitPixel, state.panelHitReadback);
+        result = device->GetRenderTargetData(panel.hitPixel, panel.hitReadback);
     D3DLOCKED_RECT locked{};
     if (SUCCEEDED(result))
-        result = state.panelHitReadback->LockRect(&locked, nullptr, D3DLOCK_READONLY);
+        result = panel.hitReadback->LockRect(&locked, nullptr, D3DLOCK_READONLY);
     bool opaque = true; // Preserve rectangular hits if readback is unavailable.
     if (SUCCEEDED(result)) {
         // A8B8G8R8 stores alpha in byte 3 on Android's little-endian ARM64.
         opaque = static_cast<const unsigned char*>(locked.pBits)[3] != 0;
-        state.panelHitReadback->UnlockRect();
-    } else if (!state.panelHitReadbackWarning) {
+        panel.hitReadback->UnlockRect();
+    } else if (!panel.hitReadbackWarning) {
         __android_log_print(ANDROID_LOG_WARN, "PerimeterXR",
             "UI alpha readback failed: 0x%08x; using rectangular panel hits", result);
-        state.panelHitReadbackWarning = true;
+        panel.hitReadbackWarning = true;
     }
-    if (state.panelHitSampleCount < 2)
-        state.panelHitSamples[state.panelHitSampleCount++] = {x, y, opaque};
+    if (panel.hitSampleCount < 2)
+        panel.hitSamples[panel.hitSampleCount++] = {x, y, opaque};
     return opaque;
 }
 
@@ -1016,7 +1033,7 @@ bool androidXrBeginFrame(AndroidXrEyeView output[2], AndroidXrInputFrame* input)
     }
     if (result != XR_SUCCESS) { logResult("xrBeginFrame", result); return false; }
     state.frameBegun = true;
-    state.panelUsesEyeImages = false;
+    for (auto& panel : state.uiPanels) panel.renderedInEyes = false;
     XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
     locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     locate.displayTime = state.frameState.predictedDisplayTime;
@@ -1038,7 +1055,7 @@ bool androidXrBeginFrame(AndroidXrEyeView output[2], AndroidXrInputFrame* input)
     if (state.recenterTime &&
         state.frameState.predictedDisplayTime >= state.recenterTime) {
         if (input) input->recentered = true;
-        state.panelPoseInitialized = false;
+        for (auto& panel : state.uiPanels) panel.poseInitialized = false;
         state.recenterTime = 0;
     }
     for (unsigned eye = 0; eye < 2; ++eye) {
@@ -1078,7 +1095,12 @@ void androidXrUnbindEye(cInterfaceRenderDevice* renderer) {
     if (auto* d3d = dynamic_cast<cD3DRender*>(renderer)) d3d->SetFrameRenderTarget(nullptr, nullptr);
 }
 
+void androidXrSelectUiPanel(AndroidXrUiPanelKind kind) {
+    bootstrap.activeUiPanel = kind;
+}
+
 bool androidXrPrepareUiPanel(unsigned width, unsigned height, AndroidXrUiPanelKind kind) {
+    androidXrSelectUiPanel(kind);
     const unsigned scale = kind == AndroidXrUiPanelKind::Menu ?
         AndroidXrMenuUiRenderScale : AndroidXrGameplayUiRenderScale;
     return bootstrap.frameBegun && bootstrap.viewsValid &&
@@ -1089,8 +1111,9 @@ bool androidXrBeginUiPanel(cInterfaceRenderDevice* renderer, unsigned width, uns
                          AndroidXrUiPanelKind kind) {
     auto* d3d = dynamic_cast<cD3DRender*>(renderer);
     if (!d3d || !androidXrPrepareUiPanel(width, height, kind)) return false;
-    d3d->SetFrameRenderTarget(bootstrap.panelTarget.surface, bootstrap.panelTarget.depth, true);
-    D3DVIEWPORT9 viewport{0, 0, bootstrap.panelTarget.width, bootstrap.panelTarget.height,
+    auto& panel = bootstrap.uiPanel();
+    d3d->SetFrameRenderTarget(panel.target.surface, panel.target.depth, true);
+    D3DVIEWPORT9 viewport{0, 0, panel.target.width, panel.target.height,
                          0.0f, 1.0f};
     if (FAILED(d3d->lpD3DDevice->SetViewport(&viewport))) {
         d3d->SetFrameRenderTarget(nullptr, nullptr);
@@ -1101,31 +1124,33 @@ bool androidXrBeginUiPanel(cInterfaceRenderDevice* renderer, unsigned width, uns
 
 void androidXrCaptureUiPanelHitSurface() {
     auto& state = bootstrap;
-    state.panelHitSurfaceValid = false;
-    state.panelHitSampleCount = 0;
-    if (!state.panelReady) return;
+    auto& panel = state.uiPanel();
+    panel.hitSurfaceValid = false;
+    panel.hitSampleCount = 0;
+    if (!panel.ready) return;
     auto* device = state.d3dDevice;
     HRESULT result = D3D_OK;
-    if (!state.panelHitSurface)
-        result = device->CreateRenderTarget(state.panelTarget.width, state.panelTarget.height,
+    if (!panel.hitSurface)
+        result = device->CreateRenderTarget(panel.target.width, panel.target.height,
             D3DFMT_A8B8G8R8, D3DMULTISAMPLE_NONE, 0, FALSE,
-            &state.panelHitSurface, nullptr);
+            &panel.hitSurface, nullptr);
     if (SUCCEEDED(result))
-        result = device->StretchRect(state.panelTarget.surface, nullptr,
-            state.panelHitSurface, nullptr, D3DTEXF_NONE);
-    state.panelHitSurfaceValid = SUCCEEDED(result);
-    if (FAILED(result) && !state.panelHitReadbackWarning) {
+        result = device->StretchRect(panel.target.surface, nullptr,
+            panel.hitSurface, nullptr, D3DTEXF_NONE);
+    panel.hitSurfaceValid = SUCCEEDED(result);
+    if (FAILED(result) && !panel.hitReadbackWarning) {
         __android_log_print(ANDROID_LOG_WARN, "PerimeterXR",
             "UI alpha snapshot failed: 0x%08x; using rectangular panel hits", result);
-        state.panelHitReadbackWarning = true;
+        panel.hitReadbackWarning = true;
     }
 }
 
 void androidXrRestoreUiPanelViewport(cInterfaceRenderDevice* renderer,
                                      unsigned width, unsigned height) {
+    auto& panel = bootstrap.uiPanel();
     auto* d3d = dynamic_cast<cD3DRender*>(renderer);
     if (!d3d || !d3d->frameColorTarget || !width || !height) return;
-    D3DVIEWPORT9 viewport{0, 0, bootstrap.panelTarget.width, bootstrap.panelTarget.height,
+    D3DVIEWPORT9 viewport{0, 0, panel.target.width, panel.target.height,
                          0.0f, 1.0f};
     d3d->lpD3DDevice->SetViewport(&viewport);
     d3d->SetClipRect(0, 0, static_cast<int>(width), static_cast<int>(height));
@@ -1143,14 +1168,15 @@ void androidXrEndUiPanel(cInterfaceRenderDevice* renderer) {
 
 bool androidXrDrawUiPanelInEye(cInterfaceRenderDevice* renderer, unsigned eye) {
     auto& state = bootstrap;
+    auto& panel = state.uiPanel();
     auto* d3d = dynamic_cast<cD3DRender*>(renderer);
-    if (!d3d || !state.frameBegun || !state.panelReady || !state.panelVisible ||
+    if (!d3d || !state.frameBegun || !panel.ready || !panel.visible ||
         eye >= 2 || d3d->frameColorTarget != state.eyeTargets[eye].surface)
         return false;
 
-    const float halfWidth = state.panelWidthMeters * 0.5f;
-    const float halfHeight = halfWidth * static_cast<float>(state.panelTarget.height) /
-                             static_cast<float>(state.panelTarget.width);
+    const float halfWidth = panel.widthMeters * 0.5f;
+    const float halfHeight = halfWidth * static_cast<float>(panel.target.height) /
+                             static_cast<float>(panel.target.width);
     const auto& view = state.views[eye];
     const XrQuaternionf inverseView{-view.pose.orientation.x, -view.pose.orientation.y,
                                      -view.pose.orientation.z, view.pose.orientation.w};
@@ -1165,17 +1191,17 @@ bool androidXrDrawUiPanelInEye(cInterfaceRenderDevice* renderer, unsigned eye) {
     const float localX[4] = {-halfWidth, halfWidth, -halfWidth, halfWidth};
     const float localY[4] = {halfHeight, halfHeight, -halfHeight, -halfHeight};
     for (unsigned corner = 0; corner < 4; ++corner) {
-        const XrVector3f rotated = rotateByQuaternion(state.panelPose.orientation,
+        const XrVector3f rotated = rotateByQuaternion(panel.pose.orientation,
                                                        {localX[corner], localY[corner], 0});
         const XrVector3f relative{
-            state.panelPose.position.x + rotated.x - view.pose.position.x,
-            state.panelPose.position.y + rotated.y - view.pose.position.y,
-            state.panelPose.position.z + rotated.z - view.pose.position.z};
+            panel.pose.position.x + rotated.x - view.pose.position.x,
+            panel.pose.position.y + rotated.y - view.pose.position.y,
+            panel.pose.position.z + rotated.z - view.pose.position.z};
         const XrVector3f inEye = rotateByQuaternion(inverseView, relative);
         if (inEye.z >= -0.05f) {
             // The fixed panel can be behind the head. Keep the scene frame and
             // omit this eye's panel instead of treating that pose as a failure.
-            state.panelUsesEyeImages = true;
+            panel.renderedInEyes = true;
             return true;
         }
         const float reciprocalDepth = -1.0f / inEye.z;
@@ -1254,7 +1280,7 @@ bool androidXrDrawUiPanelInEye(cInterfaceRenderDevice* renderer, unsigned eye) {
                              state.eyeTargets[eye].height, 0.0f, 1.0f};
     if (SUCCEEDED(result)) result = device->SetViewport(&eyeViewport);
     if (SUCCEEDED(result)) result = device->SetTexture(0,
-        static_cast<IDirect3DTexture9*>(state.panelTarget.resource));
+        static_cast<IDirect3DTexture9*>(panel.target.resource));
     if (SUCCEEDED(result)) result = device->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
     if (SUCCEEDED(result))
         result = device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, vertices, sizeof(Vertex));
@@ -1278,46 +1304,72 @@ bool androidXrDrawUiPanelInEye(cInterfaceRenderDevice* renderer, unsigned eye) {
                             static_cast<unsigned>(result));
         return false;
     }
-    state.panelUsesEyeImages = true;
+    panel.renderedInEyes = true;
     return true;
 }
 
-bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigned height,
-                         float* pixelX, float* pixelY, float* distanceMeters) {
-    const auto& state = bootstrap;
-    if (!state.panelReady || !state.panelVisible || !hand.aimValid ||
+static bool hitUiPanel(Bootstrap::UiPanel& panel, const AndroidXrHandState& hand,
+                       unsigned width, unsigned height, float* pixelX, float* pixelY,
+                       float* distanceMeters) {
+    if (!panel.ready || !panel.visible || !hand.aimValid ||
         !width || !height || !pixelX || !pixelY) return false;
     const XrVector3f origin{hand.aimPosition[0], hand.aimPosition[1], hand.aimPosition[2]};
     const XrQuaternionf aimOrientation{hand.aimOrientation[0], hand.aimOrientation[1],
                                        hand.aimOrientation[2], hand.aimOrientation[3]};
     const XrVector3f direction = rotateByQuaternion(aimOrientation, {0, 0, -1});
-    const XrVector3f normal = rotateByQuaternion(state.panelPose.orientation, {0, 0, 1});
-    const XrVector3f offset{state.panelPose.position.x - origin.x,
-                            state.panelPose.position.y - origin.y,
-                            state.panelPose.position.z - origin.z};
+    const XrVector3f normal = rotateByQuaternion(panel.pose.orientation, {0, 0, 1});
+    const XrVector3f offset{panel.pose.position.x - origin.x,
+                            panel.pose.position.y - origin.y,
+                            panel.pose.position.z - origin.z};
     const float denominator = direction.x * normal.x + direction.y * normal.y +
                               direction.z * normal.z;
     if (denominator >= -1.0e-5f) return false;
     const float distance = (offset.x * normal.x + offset.y * normal.y +
                             offset.z * normal.z) / denominator;
     if (distance <= 0.0f) return false;
-    const XrVector3f relative{origin.x + direction.x * distance - state.panelPose.position.x,
-                              origin.y + direction.y * distance - state.panelPose.position.y,
-                              origin.z + direction.z * distance - state.panelPose.position.z};
-    const XrQuaternionf inverse{-state.panelPose.orientation.x, -state.panelPose.orientation.y,
-                                -state.panelPose.orientation.z, state.panelPose.orientation.w};
+    const XrVector3f relative{origin.x + direction.x * distance - panel.pose.position.x,
+                              origin.y + direction.y * distance - panel.pose.position.y,
+                              origin.z + direction.z * distance - panel.pose.position.z};
+    const XrQuaternionf inverse{-panel.pose.orientation.x, -panel.pose.orientation.y,
+                                -panel.pose.orientation.z, panel.pose.orientation.w};
     const XrVector3f local = rotateByQuaternion(inverse, relative);
-    const float panelHeight = state.panelWidthMeters *
-        static_cast<float>(state.panelTarget.height) / state.panelTarget.width;
-    if (std::abs(local.x) > state.panelWidthMeters * 0.5f ||
+    const float panelHeight = panel.widthMeters *
+        static_cast<float>(panel.target.height) / panel.target.width;
+    if (std::abs(local.x) > panel.widthMeters * 0.5f ||
         std::abs(local.y) > panelHeight * 0.5f) return false;
-    const float u = local.x / state.panelWidthMeters + 0.5f;
+    const float u = local.x / panel.widthMeters + 0.5f;
     const float v = 0.5f - local.y / panelHeight;
-    if (state.panelHitSurfaceValid && !uiPanelPixelHasAlpha(u, v)) return false;
+    if (panel.hitSurfaceValid && !uiPanelPixelHasAlpha(panel, u, v)) return false;
     *pixelX = u * width;
     *pixelY = v * height;
     if (distanceMeters) *distanceMeters = distance;
     return true;
+}
+
+bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigned height,
+                         float* pixelX, float* pixelY, float* distanceMeters) {
+    return hitUiPanel(bootstrap.uiPanel(), hand, width, height, pixelX, pixelY, distanceMeters);
+}
+
+bool androidXrHitUiPanels(const AndroidXrHandState& hand, unsigned width, unsigned height,
+                         float* pixelX, float* pixelY, float* distanceMeters,
+                         AndroidXrUiPanelKind* kind) {
+    if (!pixelX || !pixelY) return false;
+    bool hit = false;
+    float nearest = 0.0f;
+    for (auto candidate : {AndroidXrUiPanelKind::Gameplay, AndroidXrUiPanelKind::Menu}) {
+        float x, y, distance;
+        if (hitUiPanel(bootstrap.uiPanel(candidate), hand, width, height, &x, &y, &distance) &&
+            (!hit || distance < nearest)) {
+            hit = true;
+            nearest = distance;
+            *pixelX = x;
+            *pixelY = y;
+            if (kind) *kind = candidate;
+        }
+    }
+    if (hit && distanceMeters) *distanceMeters = nearest;
+    return hit;
 }
 
 void androidXrSetUiPanelFixed() {
@@ -1326,31 +1378,34 @@ void androidXrSetUiPanelFixed() {
 
 void androidXrSetUiPanelFixed(float distanceMeters, float widthMeters) {
     auto& state = bootstrap;
-    if (state.panelHandAttached) {
-        state.panelHitSurfaceValid = false;
-        state.panelHandAttached = false;
-        state.panelPoseInitialized = false;
+    auto& panel = state.uiPanel();
+    if (panel.handAttached) {
+        panel.hitSurfaceValid = false;
+        panel.handAttached = false;
+        panel.poseInitialized = false;
     }
-    state.panelDistanceMeters = std::max(distanceMeters, 0.05f);
-    state.panelWidthMeters = std::max(widthMeters, 0.05f);
+    panel.distanceMeters = std::max(distanceMeters, 0.05f);
+    panel.widthMeters = std::max(widthMeters, 0.05f);
     initializePanelPose();
-    if (state.panelPoseInitialized) {
-        state.panelPose.position = {
-            state.panelAnchor.x + state.panelForward.x * state.panelDistanceMeters,
-            state.panelAnchor.y,
-            state.panelAnchor.z + state.panelForward.z * state.panelDistanceMeters};
+    if (panel.poseInitialized) {
+        panel.pose.position = {
+            panel.anchor.x + panel.forward.x * panel.distanceMeters,
+            panel.anchor.y,
+            panel.anchor.z + panel.forward.z * panel.distanceMeters};
     }
 }
 
 void androidXrResetUiPanelPose() {
-    if (!bootstrap.panelHandAttached)
-        bootstrap.panelPoseInitialized = false;
+    auto& panel = bootstrap.uiPanel();
+    if (!panel.handAttached)
+        panel.poseInitialized = false;
 }
 
 bool androidXrAttachUiPanelToHand(const AndroidXrHandState& hand, unsigned handIndex) {
     auto& state = bootstrap;
-    state.panelHandAttached = true;
-    state.panelWidthMeters = 0.34f;
+    auto& panel = state.uiPanel();
+    panel.handAttached = true;
+    panel.widthMeters = 0.34f;
     if (handIndex > 1 || !hand.gripValid || !hand.aimValid) return false;
     const XrQuaternionf orientation{hand.gripOrientation[0], hand.gripOrientation[1],
                                     hand.gripOrientation[2], hand.gripOrientation[3]};
@@ -1376,21 +1431,24 @@ bool androidXrAttachUiPanelToHand(const AndroidXrHandState& hand, unsigned handI
     // Grip +Z points down with a naturally held Touch controller. Rotate the
     // tablet around the grip's X axis so its front faces the player.
     constexpr float halfTiltRadians = -55.0f * (3.14159265f / 180.0f);
-    state.panelPose.orientation = multiplyQuaternions(orientation,
+    panel.pose.orientation = multiplyQuaternions(orientation,
         {std::sin(halfTiltRadians), 0.0f, 0.0f,
          std::cos(halfTiltRadians)});
-    state.panelPose.position = {basePosition.x + heightCorrection * aimUp.x,
+    panel.pose.position = {basePosition.x + heightCorrection * aimUp.x,
                                 basePosition.y + heightCorrection * aimUp.y,
                                 basePosition.z + heightCorrection * aimUp.z};
     return true;
 }
 
 void androidXrSetUiPanelVisible(bool visible) {
-    bootstrap.panelVisible = visible;
+    auto& panel = bootstrap.uiPanel();
+    panel.visible = visible;
 }
 
 static void endFrameLocked(bool rendered) {
     auto& state = bootstrap;
+    // The controller tablet is the only UI submitted as a composition layer.
+    auto& panel = state.uiPanel(AndroidXrUiPanelKind::Gameplay);
     if (!state.frameBegun) return;
     bool copied = false;
     uint32_t indexes[2]{};
@@ -1496,9 +1554,9 @@ static void endFrameLocked(bool rendered) {
         }
     }
     bool panelCopied = false;
-    if (copied && rendered && state.viewsValid && state.panelReady && state.panelVisible &&
-        !state.panelUsesEyeImages) {
-        auto& target = state.panelTarget;
+    if (copied && rendered && state.viewsValid && panel.ready && panel.visible &&
+        !panel.renderedInEyes) {
+        auto& target = panel.target;
         const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         state.interop->TransitionTextureLayout(target.interopImage, &range,
             target.originalLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -1511,15 +1569,15 @@ static void endFrameLocked(bool rendered) {
             XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
             XrResult acquireResult;
             { QueueLock lock(state.interop);
-              acquireResult = xrAcquireSwapchainImage(state.panelSwapchain, &acquire, &index); }
+              acquireResult = xrAcquireSwapchainImage(panel.swapchain, &acquire, &index); }
             acquiredPanel = XR_SUCCEEDED(acquireResult);
-            panelCopied = acquireResult == XR_SUCCESS && index < state.panelSwapchainImages.size();
+            panelCopied = acquireResult == XR_SUCCESS && index < panel.swapchainImages.size();
             if (!panelCopied) logResult("xrAcquireSwapchainImage(panel)", acquireResult);
         }
         if (panelCopied) {
             XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
             wait.timeout = XR_INFINITE_DURATION;
-            const XrResult waitResult = xrWaitSwapchainImage(state.panelSwapchain, &wait);
+            const XrResult waitResult = xrWaitSwapchainImage(panel.swapchain, &wait);
             waitedPanel = waitResult == XR_SUCCESS;
             panelCopied = waitedPanel;
             if (!panelCopied) logResult("xrWaitSwapchainImage(panel)", waitResult);
@@ -1546,7 +1604,7 @@ static void endFrameLocked(bool rendered) {
                 barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
                 barriers[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
                 barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                barriers[1].image = state.panelSwapchainImages[index].image;
+                barriers[1].image = panel.swapchainImages[index].image;
                 vkCmdPipelineBarrier(state.copyCommand, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, barriers);
                 VkImageCopy copy{};
@@ -1586,12 +1644,12 @@ static void endFrameLocked(bool rendered) {
             if (!waitedPanel) {
                 XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
                 wait.timeout = 1000000000;
-                waitedPanel = xrWaitSwapchainImage(state.panelSwapchain, &wait) == XR_SUCCESS;
+                waitedPanel = xrWaitSwapchainImage(panel.swapchain, &wait) == XR_SUCCESS;
             }
             if (waitedPanel) {
                 XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
                 QueueLock lock(state.interop);
-                if (xrReleaseSwapchainImage(state.panelSwapchain, &release) != XR_SUCCESS)
+                if (xrReleaseSwapchainImage(panel.swapchain, &release) != XR_SUCCESS)
                     panelCopied = false;
             } else {
                 panelCopied = false;
@@ -1614,16 +1672,18 @@ static void endFrameLocked(bool rendered) {
     projection.viewCount = 2;
     projection.views = projectionViews;
     XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-    quad.space = state.localSpace;
-    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-    quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
-    quad.subImage.swapchain = state.panelSwapchain;
-    quad.subImage.imageRect.extent = {static_cast<int32_t>(state.panelTarget.width),
-                                      static_cast<int32_t>(state.panelTarget.height)};
-    quad.pose = state.panelPose;
-    quad.size = {state.panelWidthMeters,
-        state.panelWidthMeters * static_cast<float>(state.panelTarget.height) /
-            static_cast<float>(state.panelTarget.width)};
+    if (panelCopied) {
+        quad.space = state.localSpace;
+        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+        quad.subImage.swapchain = panel.swapchain;
+        quad.subImage.imageRect.extent = {static_cast<int32_t>(panel.target.width),
+                                          static_cast<int32_t>(panel.target.height)};
+        quad.pose = panel.pose;
+        quad.size = {panel.widthMeters,
+            panel.widthMeters * static_cast<float>(panel.target.height) /
+                static_cast<float>(panel.target.width)};
+    }
     const XrCompositionLayerBaseHeader* layers[2] = {
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
@@ -1671,11 +1731,11 @@ void androidXrBootstrapDestroySession() {
         if (target.resource) target.resource->Release();
         target = Bootstrap::EyeTarget{};
     }
-    destroyPanelTarget();
-    bootstrap.panelPoseInitialized = false;
-    bootstrap.panelHandAttached = false;
-    bootstrap.panelWidthMeters = 1.2f;
-    bootstrap.panelDistanceMeters = 1.4f;
+    for (auto& panel : bootstrap.uiPanels) {
+        destroyPanelTarget(panel);
+        panel = Bootstrap::UiPanel{};
+    }
+    bootstrap.activeUiPanel = AndroidXrUiPanelKind::Gameplay;
     bootstrap.recenterTime = 0;
     bootstrap.d3dDevice = nullptr;
     bootstrap.depthFormat = D3DFMT_UNKNOWN;
