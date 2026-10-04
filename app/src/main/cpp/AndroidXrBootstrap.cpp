@@ -1103,7 +1103,7 @@ void androidXrCaptureUiPanelHitSurface() {
     auto& state = bootstrap;
     state.panelHitSurfaceValid = false;
     state.panelHitSampleCount = 0;
-    if (!state.panelHandAttached || !state.panelReady) return;
+    if (!state.panelReady) return;
     auto* device = state.d3dDevice;
     HRESULT result = D3D_OK;
     if (!state.panelHitSurface)
@@ -1313,8 +1313,7 @@ bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigne
         std::abs(local.y) > panelHeight * 0.5f) return false;
     const float u = local.x / state.panelWidthMeters + 0.5f;
     const float v = 0.5f - local.y / panelHeight;
-    if (state.panelHandAttached && state.panelHitSurfaceValid &&
-        !uiPanelPixelHasAlpha(u, v)) return false;
+    if (state.panelHitSurfaceValid && !uiPanelPixelHasAlpha(u, v)) return false;
     *pixelX = u * width;
     *pixelY = v * height;
     if (distanceMeters) *distanceMeters = distance;
