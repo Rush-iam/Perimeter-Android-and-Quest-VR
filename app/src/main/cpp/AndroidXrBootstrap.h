@@ -81,6 +81,10 @@ bool androidXrHitUiPanel(const AndroidXrHandState& hand, unsigned width, unsigne
 bool androidXrHitUiPanels(const AndroidXrHandState& hand, unsigned width, unsigned height,
                          float* pixelX, float* pixelY, float* distanceMeters = nullptr,
                          AndroidXrUiPanelKind* kind = nullptr);
+// Unbounded ray-to-plane distance, ignoring panel bounds and alpha.
+// Used to cap laser length at the menu plane even when the ray misses the panel.
+bool androidXrUiPanelPlaneDistance(const AndroidXrHandState& hand, float* distanceMeters,
+                                   AndroidXrUiPanelKind kind);
 void androidXrSetUiPanelFixed();
 void androidXrSetUiPanelFixed(float distanceMeters, float widthMeters);
 void androidXrResetUiPanelPose();

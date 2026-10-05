@@ -1308,28 +1308,49 @@ bool androidXrDrawUiPanelInEye(cInterfaceRenderDevice* renderer, unsigned eye) {
     return true;
 }
 
+struct PanelRayHit {
+    XrVector3f origin;
+    XrVector3f direction;
+    float distance = 0.0f;
+};
+
+static bool panelRayHit(const Bootstrap::UiPanel& panel, const AndroidXrHandState& hand,
+                        PanelRayHit& hit) {
+    if (!panel.ready || !panel.visible || !hand.aimValid) return false;
+    hit.origin = {hand.aimPosition[0], hand.aimPosition[1], hand.aimPosition[2]};
+    const XrQuaternionf aimOrientation{hand.aimOrientation[0], hand.aimOrientation[1],
+                                       hand.aimOrientation[2], hand.aimOrientation[3]};
+    hit.direction = rotateByQuaternion(aimOrientation, {0, 0, -1});
+    const XrVector3f normal = rotateByQuaternion(panel.pose.orientation, {0, 0, 1});
+    const XrVector3f offset{panel.pose.position.x - hit.origin.x,
+                            panel.pose.position.y - hit.origin.y,
+                            panel.pose.position.z - hit.origin.z};
+    const float denominator = hit.direction.x * normal.x + hit.direction.y * normal.y +
+                              hit.direction.z * normal.z;
+    if (denominator >= -1.0e-5f) return false;
+    hit.distance = (offset.x * normal.x + offset.y * normal.y +
+                    offset.z * normal.z) / denominator;
+    return hit.distance > 0.0f;
+}
+
+static bool panelPlaneDistance(const Bootstrap::UiPanel& panel, const AndroidXrHandState& hand,
+                               float* distanceMeters) {
+    if (!distanceMeters) return false;
+    PanelRayHit hit;
+    if (!panelRayHit(panel, hand, hit)) return false;
+    *distanceMeters = hit.distance;
+    return true;
+}
+
 static bool hitUiPanel(Bootstrap::UiPanel& panel, const AndroidXrHandState& hand,
                        unsigned width, unsigned height, float* pixelX, float* pixelY,
                        float* distanceMeters) {
-    if (!panel.ready || !panel.visible || !hand.aimValid ||
-        !width || !height || !pixelX || !pixelY) return false;
-    const XrVector3f origin{hand.aimPosition[0], hand.aimPosition[1], hand.aimPosition[2]};
-    const XrQuaternionf aimOrientation{hand.aimOrientation[0], hand.aimOrientation[1],
-                                       hand.aimOrientation[2], hand.aimOrientation[3]};
-    const XrVector3f direction = rotateByQuaternion(aimOrientation, {0, 0, -1});
-    const XrVector3f normal = rotateByQuaternion(panel.pose.orientation, {0, 0, 1});
-    const XrVector3f offset{panel.pose.position.x - origin.x,
-                            panel.pose.position.y - origin.y,
-                            panel.pose.position.z - origin.z};
-    const float denominator = direction.x * normal.x + direction.y * normal.y +
-                              direction.z * normal.z;
-    if (denominator >= -1.0e-5f) return false;
-    const float distance = (offset.x * normal.x + offset.y * normal.y +
-                            offset.z * normal.z) / denominator;
-    if (distance <= 0.0f) return false;
-    const XrVector3f relative{origin.x + direction.x * distance - panel.pose.position.x,
-                              origin.y + direction.y * distance - panel.pose.position.y,
-                              origin.z + direction.z * distance - panel.pose.position.z};
+    if (!width || !height || !pixelX || !pixelY) return false;
+    PanelRayHit hit;
+    if (!panelRayHit(panel, hand, hit)) return false;
+    const XrVector3f relative{hit.origin.x + hit.direction.x * hit.distance - panel.pose.position.x,
+                              hit.origin.y + hit.direction.y * hit.distance - panel.pose.position.y,
+                              hit.origin.z + hit.direction.z * hit.distance - panel.pose.position.z};
     const XrQuaternionf inverse{-panel.pose.orientation.x, -panel.pose.orientation.y,
                                 -panel.pose.orientation.z, panel.pose.orientation.w};
     const XrVector3f local = rotateByQuaternion(inverse, relative);
@@ -1342,7 +1363,7 @@ static bool hitUiPanel(Bootstrap::UiPanel& panel, const AndroidXrHandState& hand
     if (panel.hitSurfaceValid && !uiPanelPixelHasAlpha(panel, u, v)) return false;
     *pixelX = u * width;
     *pixelY = v * height;
-    if (distanceMeters) *distanceMeters = distance;
+    if (distanceMeters) *distanceMeters = hit.distance;
     return true;
 }
 
@@ -1370,6 +1391,11 @@ bool androidXrHitUiPanels(const AndroidXrHandState& hand, unsigned width, unsign
     }
     if (hit && distanceMeters) *distanceMeters = nearest;
     return hit;
+}
+
+bool androidXrUiPanelPlaneDistance(const AndroidXrHandState& hand, float* distanceMeters,
+                                   AndroidXrUiPanelKind kind) {
+    return panelPlaneDistance(bootstrap.uiPanel(kind), hand, distanceMeters);
 }
 
 void androidXrSetUiPanelFixed() {
