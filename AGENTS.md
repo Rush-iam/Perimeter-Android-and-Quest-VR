@@ -9,6 +9,22 @@
 - `/app`: The Android wrapper application (Kotlin/Java & JNI).
 - `/Perimeter`: The core C++ engine (Upstream repository). **IMPORTANT:** Minimize changes here to allow for clean upstream merges.
 - `/app/src/main/cpp`: Android-specific native code, CMake configuration, and JNI bridges.
+- `/docs`: Design, plan, progress, and investigation documents; see the Documentation Map.
+- `/scripts/frame-pacing`: PowerShell capture and analysis scripts for the frame-pacing workflow.
+- `/dxvkSmoke`, `/xrSmoke`: Standalone DXVK and OpenXR verification apps; not shipped and not covered by the flavor tasks above.
+- `/captures`, `/.tmp`: Generated working artifacts. Both are gitignored and must never be committed.
+
+### Git Submodule and Upstream Sync
+- `/Perimeter` is a Git submodule pointing at the `Rush-iam/Perimeter` fork (see `.gitmodules`), not vendored source. On a fresh clone run `git submodule update --init --recursive` before building; an empty `/Perimeter` directory means the submodule is not initialized.
+- Make engine commits on the submodule's `android` branch only, and never rewrite or rebase its published history.
+- The fork is the integration point for upstream merges: the original KD-lab `Perimeter` project is the upstream remote, and upstream releases are merged inside the fork so the `android` branch carries the Android changes on top. Keeping `/Perimeter` edits additive and guarded is what keeps that merge clean.
+
+## Documentation Map
+- `/docs` holds the project's design and evidence record. Treat these documents as the source of truth for architecture and status, and update the relevant document when a change affects it.
+- `quest3-immersive-vr-port-plan.md` is the Quest 3 VR architecture, scope, and phase-gate plan; `quest3-immersive-vr-progress.md` tracks what has actually been built, observed, and decided, and owns the phase tracker. A planned gate is not complete until its evidence is linked in the progress document.
+- `android-release-performance-plan.md` covers sustained Android release performance; `dxvk1-frame-pacing-plan.md` and `dxvk1-frame-pacing-benchmark.md` cover the frame-pacing work and its reproducible results; `dxvk1-d60-performance-benchmark.md` defines the DXVK 1 performance-mode matrix.
+- `android-dxvk-memory-investigation.md` records the DXVK memory findings; `possible-render-release-bugs.md` lists candidate debug/release rendering differences.
+- Terrain rendering has a three-document set: `terrain-lod-design-analysis.md` (problem analysis), `terrain-lod-reimplementation-plan.md` (reimplementation decision), and `tilemap-rebuild-stepping-plan.md` (rebuild-work reduction goal).
 
 ## Build & Run
 - **Build System:** Gradle (for Android) + CMake (for Native Engine).
@@ -26,6 +42,17 @@
 - **ABI Filter:** Currently targeting `arm64-v8a`.
 - **Min SDK:** 29 (Android 10).
 - **Target SDK:** 37 (Android 15).
+
+### Additional Gradle Modules
+- `:dxvkSmoke` and `:xrSmoke` (see `settings.gradle.kts`) are standalone verification apps that exercise the DXVK and OpenXR paths independently of the game. They are not shipped and are not covered by the flavor tasks above.
+- Build the DXVK smoke app with `./gradlew :dxvkSmoke:assembleDebug`; add `-PdxvkSmokeXr=true` to build its XR probe with `ANDROID_DXVK_XR=ON`.
+- Build the XR smoke app with `./gradlew :xrSmoke:assembleDebug`.
+- Both smoke modules pin `ndkVersion = "28.2.13676358"`; `:app` pins no NDK version and uses the Android Gradle Plugin default.
+
+### App Identifiers and Entry Activities
+- The application ID is `com.queststoredb.perimeter`. The `quest` flavor appends `.quest` and the `debug` and `releaseBenchmark` build types append `.debug`, so identifiers differ per variant (for example `com.queststoredb.perimeter.quest.debug`).
+- `ContentActivity` is the shared entry activity. The launcher aliases are `.MobileActivity` (mobile) and `.QuestVrActivity` (Quest); the `quest` flavor additionally declares `.QuestGameActivity` and advertises `com.oculus.intent.category.VR`.
+- Launch a specific activity by component for automation, for example `adb shell am start -n com.queststoredb.perimeter/.ContentActivity`.
 
 ### Android Studio-compatible Gradle builds
 - To reuse Android Studio's Gradle and native CMake caches, set
@@ -75,6 +102,8 @@
 - Do not set `ANDROID_USER_HOME` to a repository-local path when building or installing. The Android Gradle plugin derives the default debug keystore from that location, which would silently select `.android\debug.keystore` inside the repository and produce an APK that cannot update the Android Studio-signed install.
 - If an isolated Gradle cache is needed, set `GRADLE_USER_HOME` only; leave `ANDROID_USER_HOME` unset so signing resolves to `%USERPROFILE%\.android\debug.keystore`.
 - In shells where `adb` reports `Cannot mkdir '\.android': Permission denied`, the shell's `HOME` is empty. Set it from the Windows user profile before using `adb`: `$env:HOME = $env:USERPROFILE`. This keeps the device-auth directory at `%USERPROFILE%\.android`; do not point it at the repository. `ANDROID_USER_HOME` and `ANDROID_SDK_HOME` are not reliable fixes for this `adb` error.
+- `assembleMobileRelease` and `assembleQuestRelease` are signed with the release keystore configured through `local.properties` (`RELEASE_STORE_FILE`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`, `RELEASE_KEY_PASSWORD`). Keep that keystore outside the repository; the properties file is gitignored. Supply all four values, or the production release build type is unsigned.
+- The `releaseBenchmark` and `debug` variants use the debug keystore and the `.debug` application ID suffix instead, so they install alongside a production release build.
 
 ## Coding Standards & Guidelines
 ### Native Code (C++)
@@ -93,6 +122,10 @@
 - **UI:** The wrapper uses standard Android Views/Activity for now; Jetpack Compose is preferred for any new Android-specific UI.
 - **Namespace:** `com.queststoredb.perimeter`.
 
+### Repository Conventions
+- The engine version is parsed from `Perimeter/CMakeLists.txt` (`project(perimeter VERSION ...)`) into `BuildConfig.PERIMETER_VERSION`; keep the two in agreement when the engine version changes.
+- There is no committed formatter or lint configuration (no `.clang-format` or `.editorconfig`). Match the surrounding file's existing formatting and line endings instead of introducing a new style, and do not reformat untouched lines.
+
 ### Frame-Pacing Benchmark Workflow
 - Use the Android Studio-compatible `mobileReleaseBenchmark` build for release
   performance captures and the established scripts under `scripts/frame-pacing/`.
@@ -107,6 +140,7 @@
   a **2-second post-load settling wait** before the camera measurement. Earlier
   captures using the 250 ms gap remain valid historical results.
 - Record native DXVK timing and, when analyzing presentation, run the passive SurfaceFlinger sampler concurrently.
+- `Capture-FramePacingRun.ps1` writes runs under `captures/frame-pacing/` by default (`-OutputRoot`), and `captures/` is gitignored. Keep capture output and other working artifacts, including commit-plan documents, under the gitignored `captures/` or `.tmp/` directories rather than in tracked paths.
 
 ### Commit Plan Workflow
 - The commit title and description conventions below apply to every commit created in this repository, including direct commit requests that do not use a commit-splitting plan.
